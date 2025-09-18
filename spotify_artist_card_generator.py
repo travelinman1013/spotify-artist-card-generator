@@ -25,6 +25,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple, Any
 from urllib.parse import quote, unquote
+from bs4 import BeautifulSoup
 
 # Spotify API Configuration (reuse from existing script)
 SPOTIFY_CLIENT_ID = "a088edf333334899b6ad55579b834389"
@@ -36,6 +37,9 @@ SPOTIFY_ARTIST_URL = "https://api.spotify.com/v1/artists"
 # Wikipedia API Configuration
 WIKIPEDIA_API_BASE = "https://en.wikipedia.org/api/rest_v1"
 WIKIMEDIA_CORE_API = "https://api.wikimedia.org/core/v1/wikipedia"
+
+# Wikidata API Configuration
+WIKIDATA_API_BASE = "https://www.wikidata.org/wiki/Special:EntityData"
 
 # MusicBrainz API Configuration
 MUSICBRAINZ_API_BASE = "https://musicbrainz.org/ws/2"
@@ -189,6 +193,379 @@ class WikipediaAPI:
         except Exception as e:
             self.logger.error(f"Error getting full extract: {e}")
             return ''
+
+    def get_mobile_sections(self, page_title: str) -> Optional[Dict]:
+        """
+        Get mobile sections data which includes infobox HTML.
+
+        Args:
+            page_title: Wikipedia page title
+
+        Returns:
+            Dictionary with sections data or None
+        """
+        try:
+            encoded_title = quote(page_title.replace(' ', '_'))
+            mobile_url = f"{WIKIPEDIA_API_BASE}/page/mobile-sections/{encoded_title}"
+
+            response = self.session.get(mobile_url, timeout=REQUEST_TIMEOUT)
+
+            if response.status_code == 200:
+                return response.json()
+
+            self.logger.warning(f"Failed to get mobile sections for {page_title}: {response.status_code}")
+            return None
+
+        except Exception as e:
+            self.logger.error(f"Error getting mobile sections for {page_title}: {e}")
+            return None
+
+    def extract_infobox_data(self, mobile_data: Dict) -> Dict[str, Any]:
+        """
+        Extract structured data from mobile sections HTML.
+
+        Args:
+            mobile_data: Mobile sections response data
+
+        Returns:
+            Dictionary with extracted structured data
+        """
+        extracted = {
+            'birth_date': '',
+            'death_date': '',
+            'birth_place': '',
+            'origin': '',
+            'instruments': [],
+            'years_active': '',
+            'associated_acts': []
+        }
+
+        try:
+            # Get the lead section which contains infobox data
+            lead = mobile_data.get('lead', {})
+            sections = mobile_data.get('remaining', {}).get('sections', [])
+
+            # Combine lead text and first few sections to find infobox
+            html_content = lead.get('sections', [{}])[0].get('text', '') if lead.get('sections') else ''
+
+            if html_content:
+                soup = BeautifulSoup(html_content, 'html.parser')
+
+                # Look for infobox table
+                infobox = soup.find('table', class_=lambda x: x and 'infobox' in x.lower() if x else False)
+
+                if infobox:
+                    extracted.update(self._parse_infobox_table(infobox))
+                else:
+                    # Try to find individual data points in the HTML
+                    extracted.update(self._parse_general_html(soup))
+
+        except Exception as e:
+            self.logger.error(f"Error extracting infobox data: {e}")
+
+        return extracted
+
+    def _parse_infobox_table(self, infobox) -> Dict[str, Any]:
+        """Parse an infobox table for artist data."""
+        data = {
+            'birth_date': '',
+            'death_date': '',
+            'birth_place': '',
+            'origin': '',
+            'instruments': [],
+            'years_active': '',
+            'associated_acts': []
+        }
+
+        try:
+            rows = infobox.find_all('tr')
+
+            for row in rows:
+                th = row.find('th')
+                td = row.find('td')
+
+                if not th or not td:
+                    continue
+
+                label = th.get_text(strip=True).lower()
+                value = td.get_text(strip=True)
+
+                # Map common infobox labels to our fields
+                if 'born' in label:
+                    # Extract date and place
+                    birth_info = self._parse_birth_info(value)
+                    data['birth_date'] = birth_info.get('date', '')
+                    data['birth_place'] = birth_info.get('place', '')
+                elif 'died' in label:
+                    data['death_date'] = self._extract_date(value)
+                elif 'origin' in label or 'hometown' in label:
+                    data['origin'] = value
+                elif 'instrument' in label:
+                    data['instruments'] = self._parse_list_field(value)
+                elif 'years active' in label or 'active' in label:
+                    data['years_active'] = value
+                elif 'associated acts' in label or 'associated' in label:
+                    data['associated_acts'] = self._parse_list_field(value)
+
+        except Exception as e:
+            self.logger.error(f"Error parsing infobox table: {e}")
+
+        return data
+
+    def _parse_general_html(self, soup) -> Dict[str, Any]:
+        """Parse general HTML for artist data when no infobox is found."""
+        # This is a fallback method for pages without clear infoboxes
+        return {
+            'birth_date': '',
+            'death_date': '',
+            'birth_place': '',
+            'origin': '',
+            'instruments': [],
+            'years_active': '',
+            'associated_acts': []
+        }
+
+    def _parse_birth_info(self, birth_text: str) -> Dict[str, str]:
+        """Parse birth information to extract date and place."""
+        import re
+
+        # Common patterns for birth info
+        # Example: "September 23, 1926, Hamlet, North Carolina, U.S."
+        date_match = re.search(r'(\w+\s+\d{1,2},\s+\d{4})', birth_text)
+
+        result = {'date': '', 'place': ''}
+
+        if date_match:
+            result['date'] = date_match.group(1)
+            # Everything after the date is typically the place
+            remaining = birth_text[date_match.end():].strip(' ,')
+            if remaining:
+                result['place'] = remaining
+
+        return result
+
+    def _extract_date(self, text: str) -> str:
+        """Extract date from text."""
+        import re
+        date_match = re.search(r'(\w+\s+\d{1,2},\s+\d{4})', text)
+        return date_match.group(1) if date_match else ''
+
+    def _parse_list_field(self, text: str) -> List[str]:
+        """Parse comma-separated or newline-separated list fields."""
+        if not text:
+            return []
+
+        # Split by common separators and clean up
+        items = re.split(r'[,\n]', text)
+        return [item.strip() for item in items if item.strip()]
+
+    def get_wikidata_entity(self, wikipedia_url: str) -> Optional[str]:
+        """
+        Extract Wikidata entity ID from Wikipedia page.
+
+        Args:
+            wikipedia_url: Wikipedia page URL
+
+        Returns:
+            Wikidata entity ID (e.g., 'Q7346') or None
+        """
+        try:
+            # Use Wikipedia API to get Wikidata entity
+            page_title = wikipedia_url.split('/')[-1]
+            api_url = "https://en.wikipedia.org/w/api.php"
+            params = {
+                'action': 'query',
+                'format': 'json',
+                'titles': unquote(page_title),
+                'prop': 'pageprops',
+                'ppprop': 'wikibase_item'
+            }
+
+            response = self.session.get(api_url, params=params, timeout=REQUEST_TIMEOUT)
+
+            if response.status_code == 200:
+                data = response.json()
+                pages = data.get('query', {}).get('pages', {})
+
+                for page_data in pages.values():
+                    wikibase_item = page_data.get('pageprops', {}).get('wikibase_item')
+                    if wikibase_item:
+                        return wikibase_item
+
+            return None
+
+        except Exception as e:
+            self.logger.error(f"Error getting Wikidata entity: {e}")
+            return None
+
+    def get_wikidata_claims(self, entity_id: str) -> Dict[str, Any]:
+        """
+        Get structured data from Wikidata.
+
+        Args:
+            entity_id: Wikidata entity ID (e.g., 'Q7346')
+
+        Returns:
+            Dictionary with structured artist data
+        """
+        structured_data = {
+            'birth_date': '',
+            'death_date': '',
+            'birth_place': '',
+            'instruments': [],
+            'years_active': '',
+            'associated_acts': []
+        }
+
+        try:
+            # Get entity data from Wikidata
+            wikidata_url = f"{WIKIDATA_API_BASE}/{entity_id}.json"
+
+            response = self.session.get(wikidata_url, timeout=REQUEST_TIMEOUT)
+
+            if response.status_code == 200:
+                data = response.json()
+                entity_data = data.get('entities', {}).get(entity_id, {})
+                claims = entity_data.get('claims', {})
+
+                # Extract relevant properties
+                # P569: Date of birth
+                if 'P569' in claims:
+                    birth_date = self._extract_wikidata_date(claims['P569'])
+                    if birth_date:
+                        structured_data['birth_date'] = birth_date
+
+                # P570: Date of death
+                if 'P570' in claims:
+                    death_date = self._extract_wikidata_date(claims['P570'])
+                    if death_date:
+                        structured_data['death_date'] = death_date
+
+                # P19: Place of birth
+                if 'P19' in claims:
+                    birth_place = self._extract_wikidata_label(claims['P19'])
+                    if birth_place:
+                        structured_data['birth_place'] = birth_place
+
+                # P1303: Instruments played
+                if 'P1303' in claims:
+                    instruments = self._extract_wikidata_labels(claims['P1303'])
+                    structured_data['instruments'] = instruments
+
+                # P2032: Work period start, P2034: Work period end
+                start_year = ''
+                end_year = ''
+                if 'P2032' in claims:
+                    start_year = self._extract_wikidata_year(claims['P2032'])
+                if 'P2034' in claims:
+                    end_year = self._extract_wikidata_year(claims['P2034'])
+
+                if start_year:
+                    if end_year:
+                        structured_data['years_active'] = f"{start_year}-{end_year}"
+                    else:
+                        # If no end year but we have death date, use death year
+                        death_year = ''
+                        if structured_data.get('death_date'):
+                            death_year = structured_data['death_date'][:4]  # Extract year from YYYY-MM-DD
+
+                        if death_year:
+                            structured_data['years_active'] = f"{start_year}-{death_year}"
+                        else:
+                            structured_data['years_active'] = f"{start_year}-present"
+
+        except Exception as e:
+            self.logger.error(f"Error getting Wikidata claims for {entity_id}: {e}")
+
+        return structured_data
+
+    def _extract_wikidata_date(self, claims: List) -> str:
+        """Extract date from Wikidata claims."""
+        try:
+            if claims and len(claims) > 0:
+                main_snak = claims[0].get('mainsnak', {})
+                if main_snak.get('datatype') == 'time':
+                    time_value = main_snak.get('datavalue', {}).get('value', {}).get('time', '')
+                    # Parse Wikidata time format (+1926-09-23T00:00:00Z) to readable date
+                    if time_value:
+                        import re
+                        date_match = re.search(r'\+(\d{4})-(\d{2})-(\d{2})', time_value)
+                        if date_match:
+                            year, month, day = date_match.groups()
+                            return f"{year}-{month}-{day}"
+        except Exception:
+            pass
+        return ''
+
+    def _extract_wikidata_year(self, claims: List) -> str:
+        """Extract year from Wikidata claims."""
+        try:
+            if claims and len(claims) > 0:
+                main_snak = claims[0].get('mainsnak', {})
+                if main_snak.get('datatype') == 'time':
+                    time_value = main_snak.get('datavalue', {}).get('value', {}).get('time', '')
+                    if time_value:
+                        import re
+                        year_match = re.search(r'\+(\d{4})', time_value)
+                        if year_match:
+                            return year_match.group(1)
+        except Exception:
+            pass
+        return ''
+
+    def _extract_wikidata_label(self, claims: List) -> str:
+        """Extract label from Wikidata claims."""
+        # This would need to make additional API calls to get labels
+        # For now, return empty string
+        return ''
+
+    def _extract_wikidata_labels(self, claims: List) -> List[str]:
+        """Extract multiple labels from Wikidata claims."""
+        # This would need to make additional API calls to get labels
+        # For now, return empty list
+        return []
+
+    def get_artist_structured_data(self, artist_name: str) -> Dict[str, Any]:
+        """
+        Get comprehensive artist data from Wikipedia/Wikidata.
+
+        Args:
+            artist_name: Name of the artist
+
+        Returns:
+            Dictionary with comprehensive artist data
+        """
+        # Start with existing summary method
+        page_title = self.search_artist(artist_name)
+        if not page_title:
+            return {'biography': '', 'wikipedia_url': ''}
+
+        # Get basic summary data
+        summary_data = self.get_page_summary(page_title)
+
+        # Try to get structured data from mobile sections
+        mobile_data = self.get_mobile_sections(page_title)
+        structured_data = {}
+
+        if mobile_data:
+            structured_data = self.extract_infobox_data(mobile_data)
+
+        # Try to get Wikidata for more reliable structured data
+        wikipedia_url = summary_data.get('wikipedia_url', '')
+        if wikipedia_url:
+            entity_id = self.get_wikidata_entity(wikipedia_url)
+            if entity_id:
+                wikidata_structured = self.get_wikidata_claims(entity_id)
+                # Merge with preference for Wikidata (more reliable)
+                for key, value in wikidata_structured.items():
+                    if value:  # Only override if Wikidata has a value
+                        structured_data[key] = value
+
+        # Combine all data
+        result = summary_data.copy()
+        result.update(structured_data)
+
+        return result
 
 
 class MusicBrainzAPI:
@@ -597,22 +974,23 @@ class SpotifyArtistCardGenerator:
             image_url = spotify_artist['images'][0]['url']
             image_path = self.download_artist_image(image_url, spotify_artist['name'])
 
-        # Fetch biography data
-        biography = ""
-        biography_source = "none"
-        wikipedia_url = ""
-        musicbrainz_url = ""
+        # Fetch comprehensive Wikipedia data (biography + structured data)
+        wikipedia_data = self.wikipedia_api.get_artist_structured_data(artist_name)
+        biography = wikipedia_data.get('biography', '')
+        biography_source = "wikipedia" if biography else "none"
+        wikipedia_url = wikipedia_data.get('wikipedia_url', '')
 
-        # Try Wikipedia first
-        wikipedia_title = self.wikipedia_api.search_artist(artist_name)
-        if wikipedia_title:
-            wiki_data = self.wikipedia_api.get_page_summary(wikipedia_title)
-            if wiki_data.get('biography'):
-                biography = wiki_data['biography']
-                biography_source = "wikipedia"
-                wikipedia_url = wiki_data.get('wikipedia_url', '')
+        # Extract structured data
+        birth_date = wikipedia_data.get('birth_date', '')
+        death_date = wikipedia_data.get('death_date', '')
+        birth_place = wikipedia_data.get('birth_place', '')
+        origin = wikipedia_data.get('origin', '')
+        instruments = wikipedia_data.get('instruments', [])
+        years_active = wikipedia_data.get('years_active', '')
+        associated_acts = wikipedia_data.get('associated_acts', [])
 
         # Try MusicBrainz as fallback
+        musicbrainz_url = ""
         if not biography:
             mb_artist = self.musicbrainz_api.search_artist(artist_name)
             if mb_artist:
@@ -632,7 +1010,14 @@ class SpotifyArtistCardGenerator:
             biography_source=biography_source,
             wikipedia_url=wikipedia_url,
             musicbrainz_url=musicbrainz_url,
-            image_path=image_path
+            image_path=image_path,
+            birth_date=birth_date,
+            death_date=death_date,
+            birth_place=birth_place,
+            origin=origin,
+            instruments=instruments,
+            years_active=years_active,
+            associated_acts=associated_acts
         )
 
         # Save the card
@@ -653,6 +1038,15 @@ class SpotifyArtistCardGenerator:
         wikipedia_url = kwargs['wikipedia_url']
         musicbrainz_url = kwargs['musicbrainz_url']
         image_path = kwargs['image_path']
+
+        # New structured data fields
+        birth_date = kwargs.get('birth_date', '')
+        death_date = kwargs.get('death_date', '')
+        birth_place = kwargs.get('birth_place', '')
+        origin = kwargs.get('origin', '')
+        instruments = kwargs.get('instruments', [])
+        years_active = kwargs.get('years_active', '')
+        associated_acts = kwargs.get('associated_acts', [])
 
         # Prepare data for template
         name = artist['name']
@@ -691,7 +1085,25 @@ albums_count: {len(album_list)}
 singles_count: {len(single_list)}
 top_tracks: {json.dumps(top_track_names[:5]) if top_track_names else '[]'}
 related_artists: {json.dumps(related_artist_names[:5]) if related_artist_names else '[]'}
-biography_source: {biography_source}
+biography_source: {biography_source}"""
+
+        # Add structured data fields if available
+        if birth_date:
+            frontmatter += f"\nbirth_date: \"{birth_date}\""
+        if death_date:
+            frontmatter += f"\ndeath_date: \"{death_date}\""
+        if birth_place:
+            frontmatter += f"\nbirth_place: \"{birth_place}\""
+        if origin:
+            frontmatter += f"\norigin: \"{origin}\""
+        if instruments:
+            frontmatter += f"\ninstruments: {json.dumps(instruments)}"
+        if years_active:
+            frontmatter += f"\nyears_active: \"{years_active}\""
+        if associated_acts:
+            frontmatter += f"\nassociated_acts: {json.dumps(associated_acts[:10])}"
+
+        frontmatter += f"""
 external_urls:
   spotify: {spotify_url}
   wikipedia: {wikipedia_url}
@@ -709,7 +1121,23 @@ last_updated: {datetime.now().isoformat()}
 # {name}
 
 ## Quick Info
-- **Genres**: {', '.join(genres[:5]) if genres else 'Not specified'}
+- **Genres**: {', '.join(genres[:5]) if genres else 'Not specified'}"""
+
+        # Add structured data to Quick Info if available
+        if birth_date:
+            content += f"\n- **Born**: {birth_date}"
+            if birth_place:
+                content += f" in {birth_place}"
+        if death_date:
+            content += f"\n- **Died**: {death_date}"
+        if origin and origin != birth_place:
+            content += f"\n- **Origin**: {origin}"
+        if instruments:
+            content += f"\n- **Instruments**: {', '.join(instruments[:5])}"
+        if years_active:
+            content += f"\n- **Years Active**: {years_active}"
+
+        content += f"""
 - **Spotify Popularity**: {popularity}/100
 - **Followers**: {followers:,}
 
