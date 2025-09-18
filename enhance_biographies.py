@@ -151,7 +151,7 @@ class GeminiAnalyzer:
             }
 
         try:
-            assessment_prompt = f"""Analyze if this Wikipedia article contains substantially more biographical content than the existing summary, AND identify all mentioned musical artists/collaborators.
+            assessment_prompt = f"""Analyze if this Wikipedia article contains substantially more biographical content than the existing summary, AND identify ONLY the musical artists/collaborators EXPLICITLY mentioned in the Wikipedia source.
 
 EXISTING SUMMARY:
 {existing_bio}
@@ -167,6 +167,12 @@ Respond in this JSON format:
   "key_collaborations": ["specific collaboration details"],
   "additional_content_areas": ["early life", "musical style", "legacy"]
 }}
+
+CRITICAL REQUIREMENTS:
+- ONLY include artists/collaborators EXPLICITLY mentioned in the Wikipedia article
+- DO NOT infer, assume, or create any connections not directly stated in the source
+- VERIFY each artist name appears in the Wikipedia text before including it
+- Focus on factual accuracy over creative interpretation
 
 Criteria for "yes": Significant biographical details missing from summary (early life, career development, personal relationships, musical evolution, collaborations, legacy)
 Criteria for "no": Existing summary captures most key biographical information"""
@@ -200,6 +206,119 @@ Criteria for "no": Existing summary captures most key biographical information""
                 "key_collaborations": [],
                 "additional_content_areas": []
             }
+
+
+    def _extract_connections_from_markdown(self, biography_text: str) -> Dict[str, Any]:
+        """
+        Extract artist connections from markdown-formatted Musical Connections section.
+
+        Args:
+            biography_text: Biography text with markdown connections
+
+        Returns:
+            Dictionary with extracted connections
+        """
+        import re
+
+        connections = {
+            "mentors": [],
+            "collaborators": [],
+            "influenced": [],
+            "bands": []
+        }
+
+        # Find Musical Connections section
+        connections_match = re.search(r'## Musical Connections\s*\n(.*?)(?=\n##|\Z)', biography_text, re.DOTALL)
+        if not connections_match:
+            return connections
+
+        connections_text = connections_match.group(1)
+
+        # Extract mentors/influences - look for simple format "- Artist Name - description"
+        mentors_match = re.search(r'### Mentors/Influences\s*\n(.*?)(?=\n###|\Z)', connections_text, re.DOTALL)
+        if mentors_match:
+            mentor_lines = mentors_match.group(1).strip().split('\n')
+            for line in mentor_lines:
+                if line.strip().startswith('- '):
+                    # Extract artist name before the first dash
+                    line_content = line.strip()[2:]  # Remove "- "
+                    if ' - ' in line_content:
+                        artist_name = line_content.split(' - ')[0].strip()
+                        if artist_name:
+                            connections["mentors"].append(artist_name)
+
+        # Extract collaborators
+        collab_match = re.search(r'### Key Collaborators\s*\n(.*?)(?=\n###|\Z)', connections_text, re.DOTALL)
+        if collab_match:
+            collab_lines = collab_match.group(1).strip().split('\n')
+            for line in collab_lines:
+                if line.strip().startswith('- '):
+                    line_content = line.strip()[2:]  # Remove "- "
+                    if ' - ' in line_content:
+                        artist_name = line_content.split(' - ')[0].strip()
+                        if artist_name:
+                            connections["collaborators"].append(artist_name)
+
+        # Extract influenced artists
+        influenced_match = re.search(r'### Artists Influenced\s*\n(.*?)(?=\n###|\Z)', connections_text, re.DOTALL)
+        if influenced_match:
+            influenced_lines = influenced_match.group(1).strip().split('\n')
+            for line in influenced_lines:
+                if line.strip().startswith('- '):
+                    line_content = line.strip()[2:]  # Remove "- "
+                    if ' - ' in line_content:
+                        artist_name = line_content.split(' - ')[0].strip()
+                        if artist_name:
+                            connections["influenced"].append(artist_name)
+
+        self.logger.info(f"Extracted connections: {len(connections['mentors'])} mentors, {len(connections['collaborators'])} collaborators, {len(connections['influenced'])} influenced")
+
+        return connections
+
+    def _verify_connections_in_source(self, connections: Dict[str, Any], wikipedia_content: str) -> Dict[str, Any]:
+        """
+        Verify that extracted connections are mentioned in the Wikipedia source.
+
+        Args:
+            connections: Extracted artist connections
+            wikipedia_content: Wikipedia source text
+
+        Returns:
+            Dictionary with verified connections and confidence scores
+        """
+        if not connections or not wikipedia_content:
+            return {}
+
+        verified_connections = {}
+        verification_log = []
+
+        for category, artists in connections.items():
+            if not isinstance(artists, list):
+                continue
+
+            verified_artists = []
+            for artist in artists:
+                # Check if artist name appears in Wikipedia content
+                if artist.lower() in wikipedia_content.lower():
+                    verified_artists.append(artist)
+                    verification_log.append(f"✓ {artist} found in source")
+                else:
+                    verification_log.append(f"✗ {artist} NOT found in source")
+                    self.logger.warning(f"Artist '{artist}' in {category} not found in Wikipedia source")
+
+            if verified_artists:
+                verified_connections[category] = verified_artists
+
+        # Log verification results
+        verified_count = sum(len(v) if isinstance(v, list) else 0 for v in verified_connections.values())
+        total_count = sum(len(v) if isinstance(v, list) else 0 for v in connections.values())
+
+        if verified_count < total_count:
+            self.logger.warning(f"Source verification: {verified_count}/{total_count} connections verified")
+        else:
+            self.logger.info(f"Source verification: All {verified_count} connections verified")
+
+        return verified_connections
 
     def enhance_biography(self, wikipedia_content: str, artist_name: str) -> Dict[str, Any]:
         """
@@ -257,31 +376,48 @@ Key collaborations include work with **[[McCoy Tyner]]**, **[[Elvin Jones]]**, a
             }
 
         try:
-            enhancement_prompt = f"""Create a comprehensive biography for {artist_name} that emphasizes artist relationships and collaborations. Structure with these sections:
+            enhancement_prompt = f"""Create a comprehensive biography for {artist_name} using the Wikipedia source provided.
 
-1. **Early Life & Musical Beginnings** - mentioning early influences and teachers
-2. **Career Development** - highlighting key collaborations and band memberships
-3. **Major Works & Collaborations** - emphasizing partnerships with other artists
-4. **Musical Style & Influence** - noting artists influenced by and who influenced them
-5. **Legacy & Connections** - showing ongoing influence on other musicians
+FORMAT REQUIREMENTS:
+- Write 2-3 flowing biographical paragraphs with clear paragraph breaks
+- Focus on: early life, career highlights, key collaborations, musical style, and legacy
+- Follow with a "## Fun Facts" section containing 3-4 interesting trivia points
+- Then create a "## Musical Connections" section listing artist relationships
 
-SPECIAL REQUIREMENTS:
-- **Bold** all artist names when first mentioned: **Miles Davis**, **John Coltrane**
-- Create a "## Musical Connections" section listing:
-  - **Mentors/Influences**: Artists who influenced them
-  - **Collaborators**: Key musical partners
-  - **Mentees/Influenced**: Artists they influenced
-- Use markdown linking syntax for potential wiki links: [[Artist Name]]
-- Focus on biographical narrative, not just facts
-- Keep encyclopedic but engaging tone
+CRITICAL ACCURACY REQUIREMENTS:
+- ONLY include information EXPLICITLY mentioned in the Wikipedia source
+- DO NOT infer, assume, or create any information not directly stated
+- VERIFY each fact against the source material before including it
+- Be factual and encyclopedic in tone
 
-Also provide a separate JSON structure with extracted connections:
-{{
-  "mentors": ["Artist Name 1", "Artist Name 2"],
-  "collaborators": ["Artist Name 3", "Artist Name 4"],
-  "influenced": ["Artist Name 5", "Artist Name 6"],
-  "bands": ["Band Name 1", "Band Name 2"]
-}}
+CONTENT STRUCTURE:
+Paragraph 1: Early life, musical beginnings, key influences and teachers
+
+Paragraph 2: Career development, major collaborations, band memberships, significant recordings
+
+Paragraph 3: Musical style, innovations, legacy, and ongoing influence (if applicable)
+
+## Fun Facts
+- Interesting anecdote or lesser-known fact
+- Notable achievement or unusual detail
+- Personal characteristic or unique aspect
+- Historical context or cultural impact
+
+## Musical Connections
+### Mentors/Influences
+- Artist Name - Brief description of relationship
+
+### Key Collaborators
+- Artist Name - Brief description of collaboration
+
+### Artists Influenced
+- Artist Name - Brief description of influence
+
+FORMATTING RULES:
+- Use natural language without special formatting for artist names
+- Ensure clear paragraph breaks between biographical sections
+- Keep tone encyclopedic but engaging
+- Only include connections explicitly stated in Wikipedia source
 
 Wikipedia source:
 {wikipedia_content}"""
@@ -298,25 +434,19 @@ Wikipedia source:
 
             response_text = response.text.strip()
 
-            # Try to extract JSON connections if present
-            connections = {}
-            if '```json' in response_text:
-                try:
-                    json_start = response_text.find('```json') + 7
-                    json_end = response_text.find('```', json_start)
-                    if json_end > json_start:
-                        json_text = response_text[json_start:json_end].strip()
-                        connections = json.loads(json_text)
-                        # Remove JSON from main text
-                        response_text = response_text[:response_text.find('```json')].strip()
-                except Exception as e:
-                    self.logger.warning(f"Could not parse connections JSON: {e}")
+            # Extract connections from markdown format
+            connections = self._extract_connections_from_markdown(response_text)
+
+            # Verify connections against source material
+            verified_connections = self._verify_connections_in_source(connections, wikipedia_content)
 
             self.logger.info(f"Generated enhanced biography ({len(response_text)} characters)")
 
             return {
                 "biography": response_text,
-                "connections": connections
+                "connections": verified_connections,
+                "original_connections": connections,  # Keep original for comparison
+                "source_verified": len(verified_connections) > 0
             }
 
         except Exception as e:
@@ -330,9 +460,10 @@ Wikipedia source:
 class ArtistCardProcessor:
     """Main processor for enhancing artist cards and managing connections."""
 
-    def __init__(self, cards_dir: str, dry_run: bool = False):
+    def __init__(self, cards_dir: str, dry_run: bool = False, force: bool = False):
         self.cards_dir = Path(cards_dir)
         self.dry_run = dry_run
+        self.force = force
         self.logger = logging.getLogger(__name__)
 
         # Initialize components
@@ -426,8 +557,8 @@ class ArtistCardProcessor:
         Returns:
             Tuple of (should_process, reason)
         """
-        # Check if already enhanced
-        if frontmatter.get('biography_enhanced_at'):
+        # Check if already enhanced (unless force mode)
+        if frontmatter.get('biography_enhanced_at') and not self.force:
             return False, "already_enhanced"
 
         # Check if Wikipedia URL exists
@@ -436,6 +567,32 @@ class ArtistCardProcessor:
             return False, "no_wikipedia_url"
 
         return True, "ready_for_processing"
+
+    def _clean_biography_content(self, biography_text: str) -> str:
+        """
+        Clean biography content to remove duplicate headers and formatting issues.
+
+        Args:
+            biography_text: Raw biography text from AI
+
+        Returns:
+            Cleaned biography text
+        """
+        import re
+
+        # Remove any artist-specific Biography headers (e.g., "## Jimmie Lunceford: A Biography")
+        biography_text = re.sub(r'^##\s+[^:]+:\s*A\s+Biography\s*\n', '', biography_text, flags=re.MULTILINE)
+
+        # Remove any standalone "## Biography" headers
+        biography_text = re.sub(r'^##\s+Biography\s*\n', '', biography_text, flags=re.MULTILINE)
+
+        # Clean up any extra whitespace at the beginning
+        biography_text = biography_text.lstrip()
+
+        # Ensure there's proper spacing between sections
+        biography_text = re.sub(r'\n{3,}', '\n\n', biography_text)
+
+        return biography_text
 
     def extract_current_biography(self, content: str) -> str:
         """Extract current biography section from markdown content."""
@@ -470,16 +627,20 @@ class ArtistCardProcessor:
             if connections:
                 frontmatter['musical_connections'] = connections
                 frontmatter['network_extracted'] = True
+                frontmatter['source_verified'] = True  # Mark as source-verified
+
+            # Clean up enhanced biography to remove duplicate headers
+            cleaned_bio = self._clean_biography_content(enhanced_bio)
 
             # Replace biography section in content
             bio_pattern = r'(## Biography\s*\n).*?(?=\n##|\n\*Source:|\Z)'
-            replacement = f'\\1{enhanced_bio}\n\n*Enhanced with AI analysis*\n'
+            replacement = f'\\1{cleaned_bio}\n\n*Enhanced with AI analysis*\n'
 
             if re.search(bio_pattern, content, re.DOTALL):
                 new_content = re.sub(bio_pattern, replacement, content, flags=re.DOTALL)
             else:
                 # Add biography section if not found
-                new_content = content + f"\n\n## Biography\n{enhanced_bio}\n\n*Enhanced with AI analysis*\n"
+                new_content = content + f"\n\n## Biography\n{cleaned_bio}\n\n*Enhanced with AI analysis*\n"
 
             # Reconstruct full file
             frontmatter_text = yaml.dump(frontmatter, default_flow_style=False, allow_unicode=True)
@@ -558,6 +719,8 @@ class ArtistCardProcessor:
             enhancement_result = self.gemini_analyzer.enhance_biography(wikipedia_content, artist_name)
             enhanced_bio = enhancement_result.get('biography', '')
             connections = enhancement_result.get('connections', {})
+            source_verified = enhancement_result.get('source_verified', False)
+            original_connections = enhancement_result.get('original_connections', {})
 
             if not enhanced_bio:
                 self.stats['errors'] += 1
@@ -577,7 +740,12 @@ class ArtistCardProcessor:
 
                 self.stats['enhanced'] += 1
                 connection_count = sum(len(v) if isinstance(v, list) else 0 for v in connections.values())
-                return f"✅ Enhanced ({connection_count} connections)"
+                original_count = sum(len(v) if isinstance(v, list) else 0 for v in original_connections.values())
+
+                if original_count > connection_count:
+                    return f"✅ Enhanced ({connection_count}/{original_count} verified connections)"
+                else:
+                    return f"✅ Enhanced ({connection_count} connections)"
             else:
                 self.stats['errors'] += 1
                 return "❌ File update failed"
@@ -699,7 +867,7 @@ def main():
             sys.exit(1)
 
         # Process files
-        processor = ArtistCardProcessor(args.cards_dir, args.dry_run)
+        processor = ArtistCardProcessor(args.cards_dir, args.dry_run, args.force)
         processor.process_all_files()
 
         # Show network statistics if requested
