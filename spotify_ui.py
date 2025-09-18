@@ -19,6 +19,7 @@ from datetime import datetime
 import threading
 import queue
 import re
+import tempfile
 
 # Default paths based on your Obsidian vault structure
 DEFAULT_ARTIST_CARDS_DIR = "/Users/maxwell/LETSGO/MaxVault/01_Projects/PersonalArtistWiki/Artists"
@@ -35,23 +36,14 @@ if 'log_output' not in st.session_state:
     st.session_state.log_output = []
 if 'config' not in st.session_state:
     st.session_state.config = {}
-if 'selected_downloader_file' not in st.session_state:
-    st.session_state.selected_downloader_file = None
-if 'selected_generator_file' not in st.session_state:
-    st.session_state.selected_generator_file = None
-# File browser modal state
-if 'show_file_browser_downloader' not in st.session_state:
-    st.session_state.show_file_browser_downloader = False
-if 'show_file_browser_generator' not in st.session_state:
-    st.session_state.show_file_browser_generator = False
-if 'available_files_downloader' not in st.session_state:
-    st.session_state.available_files_downloader = []
-if 'available_files_generator' not in st.session_state:
-    st.session_state.available_files_generator = []
-if 'pending_file_selection_downloader' not in st.session_state:
-    st.session_state.pending_file_selection_downloader = None
-if 'pending_file_selection_generator' not in st.session_state:
-    st.session_state.pending_file_selection_generator = None
+if 'uploaded_file_downloader' not in st.session_state:
+    st.session_state.uploaded_file_downloader = None
+if 'uploaded_file_generator' not in st.session_state:
+    st.session_state.uploaded_file_generator = None
+if 'temp_file_path_downloader' not in st.session_state:
+    st.session_state.temp_file_path_downloader = None
+if 'temp_file_path_generator' not in st.session_state:
+    st.session_state.temp_file_path_generator = None
 
 def load_config():
     """Load saved configuration from file."""
@@ -73,24 +65,30 @@ def save_config(config):
     with open(CONFIG_FILE, 'w') as f:
         json.dump(config, f, indent=2)
 
-def find_archive_files(directory):
-    """Find markdown files that look like daily archives."""
-    archive_files = []
-    try:
-        path = Path(directory)
-        # Look for .md files with date patterns or "archive" in the name
-        patterns = ['*.md']
-        for pattern in patterns:
-            for file in path.rglob(pattern):
-                file_str = str(file)
-                # Check if filename contains date pattern or "archive"
-                if any(x in file_str.lower() for x in ['archive', '2024', '2025', 'daily']):
-                    archive_files.append(file_str)
-        # Sort by modification time (most recent first)
-        archive_files.sort(key=lambda x: os.path.getmtime(x), reverse=True)
-    except Exception as e:
-        st.error(f"Error scanning directory: {e}")
-    return archive_files[:50]  # Return only the 50 most recent
+def save_uploaded_file(uploaded_file, prefix="archive"):
+    """Save uploaded file to temp directory and return path."""
+    if uploaded_file is None:
+        return None
+
+    # Create temp file with original extension
+    suffix = Path(uploaded_file.name).suffix
+    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix, prefix=f"{prefix}_")
+
+    # Write uploaded content to temp file
+    temp_file.write(uploaded_file.getbuffer())
+    temp_file.close()
+
+    return temp_file.name
+
+def cleanup_temp_file(file_path):
+    """Clean up temporary file."""
+    if file_path and os.path.exists(file_path):
+        try:
+            os.unlink(file_path)
+        except Exception:
+            pass  # Ignore cleanup errors
+
+# find_archive_files function removed - no longer needed with file uploader
 
 def validate_selected_file(file_path):
     """Validate that the selected file exists and is readable."""
@@ -158,6 +156,13 @@ def main():
         layout="wide"
     )
 
+    # Cleanup temp files on session end
+    def cleanup_temp_files():
+        if st.session_state.get('temp_file_path_downloader'):
+            cleanup_temp_file(st.session_state.temp_file_path_downloader)
+        if st.session_state.get('temp_file_path_generator'):
+            cleanup_temp_file(st.session_state.temp_file_path_generator)
+
     st.title("🎵 Spotify Artist Tools")
     st.markdown("Download artist images and generate comprehensive artist cards for your Obsidian vault")
 
@@ -177,9 +182,33 @@ def main():
         with col1:
             st.subheader("Input File")
 
-            # Recent files dropdown
+            # File uploader - primary method
+            uploaded_file = st.file_uploader(
+                "Select daily archive file:",
+                type=['md'],
+                key="file_uploader_downloader",
+                help="Upload a markdown file containing daily music archive data"
+            )
+
+            # Handle uploaded file
+            if uploaded_file is not None:
+                if st.session_state.uploaded_file_downloader != uploaded_file:
+                    # New file uploaded, save to temp location
+                    if st.session_state.temp_file_path_downloader:
+                        cleanup_temp_file(st.session_state.temp_file_path_downloader)
+
+                    st.session_state.temp_file_path_downloader = save_uploaded_file(uploaded_file, "downloader")
+                    st.session_state.uploaded_file_downloader = uploaded_file
+
+                input_file = st.session_state.temp_file_path_downloader
+                st.success(f"✅ File uploaded: {uploaded_file.name}")
+            else:
+                input_file = None
+
+            # Recent files dropdown as secondary option
             recent_files = st.session_state.config.get('recent_files', [])
-            if recent_files:
+            if recent_files and not uploaded_file:
+                st.markdown("**Or select from recent files:**")
                 selected_recent = st.selectbox(
                     "Recent files:",
                     ["Select a recent file..."] + recent_files,
@@ -187,32 +216,6 @@ def main():
                 )
                 if selected_recent != "Select a recent file...":
                     input_file = selected_recent
-                else:
-                    input_file = None
-
-            # Get current input file value
-            current_input_file = ""
-            if st.session_state.selected_downloader_file:
-                current_input_file = st.session_state.selected_downloader_file
-            elif recent_files and selected_recent != "Select a recent file...":
-                current_input_file = selected_recent
-
-            # File input
-            input_file = st.text_input(
-                "Daily archive file path:",
-                value=current_input_file,
-                placeholder="/path/to/daily_archive.md",
-                key="downloader_input"
-            )
-
-            # Browse button
-            if st.button("📂 Browse Archive Files", key="browse_downloader"):
-                st.session_state.show_file_browser_downloader = True
-                archive_dir = st.session_state.config.get('archive_dir', DEFAULT_ARCHIVE_DIR)
-                with st.spinner(f"Scanning {archive_dir}..."):
-                    files = find_archive_files(archive_dir)
-                    st.session_state.available_files_downloader = files
-                st.rerun()
 
             st.subheader("Output Directory")
             output_dir = st.text_input(
@@ -224,70 +227,29 @@ def main():
             # Options
             skip_existing = st.checkbox("Skip existing images", value=True, key="skip_existing")
 
-            # File Browser Modal for Downloader
-            if st.session_state.show_file_browser_downloader:
-                st.markdown("---")
-                st.subheader("📂 Select Archive File")
-
-                if st.session_state.available_files_downloader:
-                    st.info(f"Found {len(st.session_state.available_files_downloader)} archive files")
-
-                    # File selection
-                    selected_file = st.selectbox(
-                        "Choose a file:",
-                        st.session_state.available_files_downloader,
-                        key="browser_file_select_downloader"
-                    )
-
-                    if selected_file:
-                        st.session_state.pending_file_selection_downloader = selected_file
-                        st.text(f"📄 Selected: {os.path.basename(selected_file)}")
-
-                    # Action buttons
-                    col_confirm, col_cancel = st.columns(2)
-                    with col_confirm:
-                        if st.button("✅ Use This File", key="confirm_downloader"):
-                            if st.session_state.pending_file_selection_downloader:
-                                st.session_state.selected_downloader_file = st.session_state.pending_file_selection_downloader
-                                st.session_state.show_file_browser_downloader = False
-                                st.session_state.pending_file_selection_downloader = None
-                                st.rerun()
-
-                    with col_cancel:
-                        if st.button("❌ Cancel", key="cancel_downloader"):
-                            st.session_state.show_file_browser_downloader = False
-                            st.session_state.pending_file_selection_downloader = None
-                            st.rerun()
-                else:
-                    st.warning("No archive files found in the configured directory.")
-                    if st.button("❌ Close", key="close_no_files_downloader"):
-                        st.session_state.show_file_browser_downloader = False
-                        st.rerun()
-
         with col2:
             st.subheader("Options")
 
             # Run button
             if st.button("▶️ Download Images", type="primary", key="run_downloader",
                         disabled=st.session_state.running):
-                # Get the actual input file value from text input or session state
-                actual_input_file = st.session_state.get("downloader_input", "") or current_input_file
-                if actual_input_file and output_dir:
+                if input_file and output_dir:
                     # Validate the input file
-                    is_valid, validation_message = validate_selected_file(actual_input_file)
+                    is_valid, validation_message = validate_selected_file(input_file)
                     if not is_valid:
                         st.error(f"❌ Invalid input file: {validation_message}")
                         return
-                    # Update recent files
-                    if actual_input_file not in recent_files:
-                        recent_files.insert(0, actual_input_file)
+
+                    # Update recent files only if it's a path-based file (not uploaded)
+                    if input_file not in recent_files and not uploaded_file:
+                        recent_files.insert(0, input_file)
                         recent_files = recent_files[:10]  # Keep only 10 most recent
                         st.session_state.config['recent_files'] = recent_files
                         save_config(st.session_state.config)
 
                     # Build command
                     cmd = f"source venv/bin/activate && python spotify_image_downloader.py"
-                    cmd += f' --input "{actual_input_file}"'
+                    cmd += f' --input "{input_file}"'
                     cmd += f' --output "{output_dir}"'
                     if skip_existing:
                         cmd += " --skip-existing"
@@ -361,9 +323,33 @@ def main():
                 )
                 input_file_gen = None
             else:
-                # Recent files dropdown for generator
+                # File uploader - primary method
+                uploaded_file_gen = st.file_uploader(
+                    "Select daily archive file:",
+                    type=['md'],
+                    key="file_uploader_generator",
+                    help="Upload a markdown file containing daily music archive data"
+                )
+
+                # Handle uploaded file
+                if uploaded_file_gen is not None:
+                    if st.session_state.uploaded_file_generator != uploaded_file_gen:
+                        # New file uploaded, save to temp location
+                        if st.session_state.temp_file_path_generator:
+                            cleanup_temp_file(st.session_state.temp_file_path_generator)
+
+                        st.session_state.temp_file_path_generator = save_uploaded_file(uploaded_file_gen, "generator")
+                        st.session_state.uploaded_file_generator = uploaded_file_gen
+
+                    input_file_gen = st.session_state.temp_file_path_generator
+                    st.success(f"✅ File uploaded: {uploaded_file_gen.name}")
+                else:
+                    input_file_gen = None
+
+                # Recent files dropdown as secondary option
                 recent_files = st.session_state.config.get('recent_files', [])
-                if recent_files:
+                if recent_files and not uploaded_file_gen:
+                    st.markdown("**Or select from recent files:**")
                     selected_recent = st.selectbox(
                         "Recent files:",
                         ["Select a recent file..."] + recent_files,
@@ -371,34 +357,6 @@ def main():
                     )
                     if selected_recent != "Select a recent file...":
                         input_file_gen = selected_recent
-                    else:
-                        input_file_gen = None
-                else:
-                    input_file_gen = None
-
-                # Get current input file value
-                current_input_file_gen = ""
-                if st.session_state.selected_generator_file:
-                    current_input_file_gen = st.session_state.selected_generator_file
-                elif recent_files and selected_recent != "Select a recent file...":
-                    current_input_file_gen = selected_recent
-
-                # File input
-                input_file_gen = st.text_input(
-                    "Daily archive file path:",
-                    value=current_input_file_gen,
-                    placeholder="/path/to/daily_archive.md",
-                    key="generator_input"
-                )
-
-                # Browse button
-                if st.button("📂 Browse Archive Files", key="browse_generator"):
-                    st.session_state.show_file_browser_generator = True
-                    archive_dir = st.session_state.config.get('archive_dir', DEFAULT_ARCHIVE_DIR)
-                    with st.spinner(f"Scanning {archive_dir}..."):
-                        files = find_archive_files(archive_dir)
-                        st.session_state.available_files_generator = files
-                    st.rerun()
 
                 artist_name = None
 
@@ -416,45 +374,6 @@ def main():
                 key="images_output"
             )
 
-            # File Browser Modal for Generator
-            if st.session_state.show_file_browser_generator:
-                st.markdown("---")
-                st.subheader("📂 Select Archive File")
-
-                if st.session_state.available_files_generator:
-                    st.info(f"Found {len(st.session_state.available_files_generator)} archive files")
-
-                    # File selection
-                    selected_file = st.selectbox(
-                        "Choose a file:",
-                        st.session_state.available_files_generator,
-                        key="browser_file_select_generator"
-                    )
-
-                    if selected_file:
-                        st.session_state.pending_file_selection_generator = selected_file
-                        st.text(f"📄 Selected: {os.path.basename(selected_file)}")
-
-                    # Action buttons
-                    col_confirm, col_cancel = st.columns(2)
-                    with col_confirm:
-                        if st.button("✅ Use This File", key="confirm_generator"):
-                            if st.session_state.pending_file_selection_generator:
-                                st.session_state.selected_generator_file = st.session_state.pending_file_selection_generator
-                                st.session_state.show_file_browser_generator = False
-                                st.session_state.pending_file_selection_generator = None
-                                st.rerun()
-
-                    with col_cancel:
-                        if st.button("❌ Cancel", key="cancel_generator"):
-                            st.session_state.show_file_browser_generator = False
-                            st.session_state.pending_file_selection_generator = None
-                            st.rerun()
-                else:
-                    st.warning("No archive files found in the configured directory.")
-                    if st.button("❌ Close", key="close_no_files_generator"):
-                        st.session_state.show_file_browser_generator = False
-                        st.rerun()
 
         with col2:
             st.subheader("Options")
@@ -468,19 +387,19 @@ def main():
             # Run button
             if st.button("▶️ Generate Cards", type="primary", key="run_generator",
                         disabled=st.session_state.running):
-                # Get the actual input file value from text input or session state
-                actual_input_file_gen = st.session_state.get("generator_input", "") or current_input_file_gen
-                if (artist_name or actual_input_file_gen) and cards_output_dir:
+                if (artist_name or input_file_gen) and cards_output_dir:
                     # Validate the input file if using file mode
-                    if actual_input_file_gen and not artist_name:
-                        is_valid, validation_message = validate_selected_file(actual_input_file_gen)
+                    if input_file_gen and not artist_name:
+                        is_valid, validation_message = validate_selected_file(input_file_gen)
                         if not is_valid:
                             st.error(f"❌ Invalid input file: {validation_message}")
                             return
-                    # Update recent files if using file input
-                    if actual_input_file_gen:
-                        if actual_input_file_gen not in recent_files:
-                            recent_files.insert(0, actual_input_file_gen)
+
+                    # Update recent files only if it's a path-based file (not uploaded)
+                    if input_file_gen and not artist_name and not uploaded_file_gen:
+                        recent_files = st.session_state.config.get('recent_files', [])
+                        if input_file_gen not in recent_files:
+                            recent_files.insert(0, input_file_gen)
                             recent_files = recent_files[:10]
                             st.session_state.config['recent_files'] = recent_files
                             save_config(st.session_state.config)
@@ -491,7 +410,7 @@ def main():
                     if artist_name:
                         cmd += f' --artist "{artist_name}"'
                     else:
-                        cmd += f' --input-file "{actual_input_file_gen}"'
+                        cmd += f' --input-file "{input_file_gen}"'
 
                     cmd += f' --output-dir "{cards_output_dir}"'
 
