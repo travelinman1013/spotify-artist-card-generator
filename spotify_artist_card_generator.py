@@ -1,0 +1,906 @@
+#!/usr/bin/env python3
+"""
+Spotify Artist Card Generator with Biography Integration
+
+Generates comprehensive artist cards for Obsidian vault by combining:
+- Spotify API metadata (albums, tracks, popularity)
+- Wikipedia biographies (primary source)
+- MusicBrainz data (fallback source)
+
+Usage:
+    python spotify_artist_card_generator.py --artist "Artist Name" --output-dir path/to/Artists
+    python spotify_artist_card_generator.py --input-file daily_archive.md --output-dir path/to/Artists
+"""
+
+import os
+import re
+import sys
+import time
+import json
+import logging
+import argparse
+import requests
+import base64
+from pathlib import Path
+from datetime import datetime
+from typing import List, Dict, Optional, Tuple, Any
+from urllib.parse import quote, unquote
+
+# Spotify API Configuration (reuse from existing script)
+SPOTIFY_CLIENT_ID = "a088edf333334899b6ad55579b834389"
+SPOTIFY_CLIENT_SECRET = "78b5d889d9094ff0bb0b2a22cc8cfaac"
+SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
+SPOTIFY_SEARCH_URL = "https://api.spotify.com/v1/search"
+SPOTIFY_ARTIST_URL = "https://api.spotify.com/v1/artists"
+
+# Wikipedia API Configuration
+WIKIPEDIA_API_BASE = "https://en.wikipedia.org/api/rest_v1"
+WIKIMEDIA_CORE_API = "https://api.wikimedia.org/core/v1/wikipedia"
+
+# MusicBrainz API Configuration
+MUSICBRAINZ_API_BASE = "https://musicbrainz.org/ws/2"
+
+# Configuration
+MAX_RETRIES = 3
+REQUEST_TIMEOUT = 30
+RATE_LIMIT_DELAY = 1.0  # Delay between API requests
+USER_AGENT = "SpotifyArtistCardGenerator/1.0 (https://github.com/yourusername/project)"
+
+
+class WikipediaAPI:
+    """Handles Wikipedia API interactions for fetching artist biographies."""
+
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': USER_AGENT
+        })
+        self.logger = logging.getLogger(__name__)
+
+    def search_artist(self, artist_name: str) -> Optional[str]:
+        """
+        Search for artist Wikipedia page.
+
+        Args:
+            artist_name: Name of the artist to search for
+
+        Returns:
+            Wikipedia page title if found, None otherwise
+        """
+        try:
+            # First try with REST API search
+            search_url = f"{WIKIMEDIA_CORE_API}/en/search/page"
+            params = {
+                'q': artist_name,
+                'limit': 3
+            }
+
+            response = self.session.get(
+                search_url,
+                params=params,
+                timeout=REQUEST_TIMEOUT
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                pages = data.get('pages', [])
+
+                # Look for best match (case-insensitive)
+                for page in pages:
+                    title = page.get('title', '')
+                    # Check if it's likely an artist page (not a disambiguation)
+                    if artist_name.lower() in title.lower():
+                        if 'disambiguation' not in title.lower():
+                            self.logger.info(f"Found Wikipedia page: {title}")
+                            return title
+
+                # If no exact match, return first result if available
+                if pages:
+                    title = pages[0].get('title')
+                    self.logger.info(f"Using Wikipedia page: {title}")
+                    return title
+
+            self.logger.warning(f"No Wikipedia page found for {artist_name}")
+            return None
+
+        except Exception as e:
+            self.logger.error(f"Error searching Wikipedia for {artist_name}: {e}")
+            return None
+
+    def get_page_summary(self, page_title: str) -> Dict[str, Any]:
+        """
+        Get Wikipedia page summary and extract.
+
+        Args:
+            page_title: Wikipedia page title
+
+        Returns:
+            Dictionary with biography text and metadata
+        """
+        try:
+            # URL encode the title
+            encoded_title = quote(page_title.replace(' ', '_'))
+
+            # Get page summary
+            summary_url = f"{WIKIPEDIA_API_BASE}/page/summary/{encoded_title}"
+
+            response = self.session.get(summary_url, timeout=REQUEST_TIMEOUT)
+
+            if response.status_code == 200:
+                data = response.json()
+
+                result = {
+                    'biography': data.get('extract', ''),
+                    'description': data.get('description', ''),
+                    'wikipedia_url': data.get('content_urls', {}).get('desktop', {}).get('page', ''),
+                    'thumbnail': data.get('thumbnail', {}).get('source', ''),
+                    'page_title': data.get('title', page_title)
+                }
+
+                # Try to get more detailed extract if needed
+                if len(result['biography']) < 200:
+                    result['biography'] = self._get_full_extract(encoded_title)
+
+                return result
+
+            return {'biography': '', 'wikipedia_url': ''}
+
+        except Exception as e:
+            self.logger.error(f"Error getting Wikipedia summary for {page_title}: {e}")
+            return {'biography': '', 'wikipedia_url': ''}
+
+    def _get_full_extract(self, page_title: str) -> str:
+        """
+        Get fuller extract from Wikipedia page.
+
+        Args:
+            page_title: URL-encoded page title
+
+        Returns:
+            Extended biography text
+        """
+        try:
+            # Use action API for longer extracts
+            api_url = "https://en.wikipedia.org/w/api.php"
+            params = {
+                'action': 'query',
+                'format': 'json',
+                'titles': unquote(page_title),
+                'prop': 'extracts',
+                'exintro': True,
+                'explaintext': True,
+                'exsectionformat': 'plain',
+                'exchars': 1000
+            }
+
+            response = self.session.get(api_url, params=params, timeout=REQUEST_TIMEOUT)
+
+            if response.status_code == 200:
+                data = response.json()
+                pages = data.get('query', {}).get('pages', {})
+
+                for page_id, page_data in pages.items():
+                    extract = page_data.get('extract', '')
+                    if extract:
+                        return extract
+
+            return ''
+
+        except Exception as e:
+            self.logger.error(f"Error getting full extract: {e}")
+            return ''
+
+
+class MusicBrainzAPI:
+    """Handles MusicBrainz API interactions as fallback for artist data."""
+
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': USER_AGENT,
+            'Accept': 'application/json'
+        })
+        self.logger = logging.getLogger(__name__)
+
+    def search_artist(self, artist_name: str) -> Optional[Dict]:
+        """
+        Search for artist on MusicBrainz.
+
+        Args:
+            artist_name: Name of the artist to search for
+
+        Returns:
+            Artist data if found, None otherwise
+        """
+        try:
+            search_url = f"{MUSICBRAINZ_API_BASE}/artist/"
+            params = {
+                'query': f'name:"{artist_name}"',
+                'fmt': 'json',
+                'limit': 5
+            }
+
+            response = self.session.get(
+                search_url,
+                params=params,
+                timeout=REQUEST_TIMEOUT
+            )
+
+            # MusicBrainz rate limiting
+            time.sleep(1.0)
+
+            if response.status_code == 200:
+                data = response.json()
+                artists = data.get('artists', [])
+
+                if artists:
+                    # Return best match (highest score)
+                    best_match = artists[0]
+                    self.logger.info(f"Found MusicBrainz artist: {best_match.get('name')}")
+                    return best_match
+
+            self.logger.warning(f"No MusicBrainz artist found for {artist_name}")
+            return None
+
+        except Exception as e:
+            self.logger.error(f"Error searching MusicBrainz for {artist_name}: {e}")
+            return None
+
+    def get_artist_details(self, artist_mbid: str) -> Dict[str, Any]:
+        """
+        Get detailed artist information from MusicBrainz.
+
+        Args:
+            artist_mbid: MusicBrainz artist ID
+
+        Returns:
+            Dictionary with artist details
+        """
+        try:
+            details_url = f"{MUSICBRAINZ_API_BASE}/artist/{artist_mbid}"
+            params = {
+                'inc': 'aliases+annotation+tags+genres',
+                'fmt': 'json'
+            }
+
+            response = self.session.get(
+                details_url,
+                params=params,
+                timeout=REQUEST_TIMEOUT
+            )
+
+            # MusicBrainz rate limiting
+            time.sleep(1.0)
+
+            if response.status_code == 200:
+                data = response.json()
+
+                result = {
+                    'name': data.get('name', ''),
+                    'aliases': [alias.get('name') for alias in data.get('aliases', [])],
+                    'biography': data.get('annotation', ''),
+                    'tags': [tag.get('name') for tag in data.get('tags', [])],
+                    'genres': [genre.get('name') for genre in data.get('genres', [])],
+                    'begin_date': data.get('life-span', {}).get('begin', ''),
+                    'end_date': data.get('life-span', {}).get('end', ''),
+                    'area': data.get('area', {}).get('name', ''),
+                    'musicbrainz_url': f"https://musicbrainz.org/artist/{artist_mbid}"
+                }
+
+                return result
+
+            return {}
+
+        except Exception as e:
+            self.logger.error(f"Error getting MusicBrainz details for {artist_mbid}: {e}")
+            return {}
+
+
+class SpotifyArtistCardGenerator:
+    """Main class for generating artist cards with Spotify and biography data."""
+
+    def __init__(self, output_dir: str, images_dir: Optional[str] = None):
+        self.output_dir = Path(output_dir)
+        self.images_dir = Path(images_dir) if images_dir else Path(output_dir).parent.parent.parent / "03_Resources/source_material/ArtistPortraits"
+
+        # Create directories if they don't exist
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.images_dir.mkdir(parents=True, exist_ok=True)
+
+        # Initialize APIs
+        self.wikipedia_api = WikipediaAPI()
+        self.musicbrainz_api = MusicBrainzAPI()
+
+        # Spotify authentication
+        self.access_token = None
+        self.token_expires_at = 0
+        self.session = requests.Session()
+
+        # Set up logging
+        self.setup_logging()
+
+    def setup_logging(self):
+        """Configure logging for the application."""
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.StreamHandler(sys.stdout),
+                logging.FileHandler('artist_card_generator.log')
+            ]
+        )
+        self.logger = logging.getLogger(__name__)
+
+    def authenticate_spotify(self) -> bool:
+        """Authenticate with Spotify using Client Credentials flow."""
+        try:
+            credentials = f"{SPOTIFY_CLIENT_ID}:{SPOTIFY_CLIENT_SECRET}"
+            encoded_credentials = base64.b64encode(credentials.encode()).decode()
+
+            headers = {
+                "Authorization": f"Basic {encoded_credentials}",
+                "Content-Type": "application/x-www-form-urlencoded"
+            }
+
+            data = {"grant_type": "client_credentials"}
+
+            response = self.session.post(
+                SPOTIFY_TOKEN_URL,
+                headers=headers,
+                data=data,
+                timeout=REQUEST_TIMEOUT
+            )
+
+            if response.status_code == 200:
+                token_data = response.json()
+                self.access_token = token_data["access_token"]
+                expires_in = token_data.get("expires_in", 3600)
+                self.token_expires_at = time.time() + expires_in - 60
+
+                self.logger.info("Successfully authenticated with Spotify API")
+                return True
+            else:
+                self.logger.error(f"Failed to authenticate with Spotify: {response.status_code}")
+                return False
+
+        except Exception as e:
+            self.logger.error(f"Exception during Spotify authentication: {e}")
+            return False
+
+    def ensure_authenticated(self) -> bool:
+        """Ensure we have a valid access token."""
+        if not self.access_token or time.time() >= self.token_expires_at:
+            return self.authenticate_spotify()
+        return True
+
+    def search_spotify_artist(self, artist_name: str) -> Optional[Dict]:
+        """Search for an artist on Spotify."""
+        if not self.ensure_authenticated():
+            return None
+
+        try:
+            headers = {
+                "Authorization": f"Bearer {self.access_token}",
+                "Content-Type": "application/json"
+            }
+
+            query = quote(artist_name)
+            url = f"{SPOTIFY_SEARCH_URL}?q={query}&type=artist&limit=10"
+
+            response = self.session.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+
+            if response.status_code == 200:
+                data = response.json()
+                artists = data.get('artists', {}).get('items', [])
+
+                if artists:
+                    best_match = artists[0]
+                    self.logger.info(f"Found Spotify artist: {best_match['name']} (ID: {best_match['id']})")
+                    return best_match
+
+            elif response.status_code == 401:
+                self.logger.warning("Access token expired, re-authenticating...")
+                if self.authenticate_spotify():
+                    return self.search_spotify_artist(artist_name)
+
+            return None
+
+        except Exception as e:
+            self.logger.error(f"Error searching Spotify for {artist_name}: {e}")
+            return None
+
+    def get_artist_albums(self, artist_id: str) -> List[Dict]:
+        """Get artist's albums from Spotify."""
+        if not self.ensure_authenticated():
+            return []
+
+        try:
+            headers = {
+                "Authorization": f"Bearer {self.access_token}",
+                "Content-Type": "application/json"
+            }
+
+            albums = []
+            url = f"{SPOTIFY_ARTIST_URL}/{artist_id}/albums"
+            params = {
+                'include_groups': 'album,single',
+                'limit': 50,
+                'market': 'US'
+            }
+
+            while url:
+                response = self.session.get(
+                    url,
+                    headers=headers,
+                    params=params if not albums else {},
+                    timeout=REQUEST_TIMEOUT
+                )
+
+                if response.status_code == 200:
+                    data = response.json()
+                    albums.extend(data.get('items', []))
+                    url = data.get('next')
+                    time.sleep(0.5)  # Rate limiting
+                else:
+                    break
+
+            return albums
+
+        except Exception as e:
+            self.logger.error(f"Error getting albums for artist {artist_id}: {e}")
+            return []
+
+    def get_artist_top_tracks(self, artist_id: str) -> List[Dict]:
+        """Get artist's top tracks from Spotify."""
+        if not self.ensure_authenticated():
+            return []
+
+        try:
+            headers = {
+                "Authorization": f"Bearer {self.access_token}",
+                "Content-Type": "application/json"
+            }
+
+            url = f"{SPOTIFY_ARTIST_URL}/{artist_id}/top-tracks"
+            params = {'market': 'US'}
+
+            response = self.session.get(
+                url,
+                headers=headers,
+                params=params,
+                timeout=REQUEST_TIMEOUT
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                return data.get('tracks', [])
+
+            return []
+
+        except Exception as e:
+            self.logger.error(f"Error getting top tracks for artist {artist_id}: {e}")
+            return []
+
+    def get_related_artists(self, artist_id: str) -> List[Dict]:
+        """Get related artists from Spotify."""
+        if not self.ensure_authenticated():
+            return []
+
+        try:
+            headers = {
+                "Authorization": f"Bearer {self.access_token}",
+                "Content-Type": "application/json"
+            }
+
+            url = f"{SPOTIFY_ARTIST_URL}/{artist_id}/related-artists"
+
+            response = self.session.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+
+            if response.status_code == 200:
+                data = response.json()
+                return data.get('artists', [])[:10]  # Limit to 10 related artists
+
+            return []
+
+        except Exception as e:
+            self.logger.error(f"Error getting related artists for {artist_id}: {e}")
+            return []
+
+    def download_artist_image(self, image_url: str, artist_name: str) -> str:
+        """Download artist image and return the relative path."""
+        try:
+            sanitized_name = self.sanitize_filename(artist_name)
+
+            # Check if image already exists
+            for ext in ['.jpg', '.jpeg', '.png', '.webp']:
+                image_path = self.images_dir / f"{sanitized_name}{ext}"
+                if image_path.exists():
+                    self.logger.info(f"Image already exists: {image_path}")
+                    return f"03_Resources/source_material/ArtistPortraits/{sanitized_name}{ext}"
+
+            # Download new image
+            response = self.session.get(image_url, timeout=REQUEST_TIMEOUT, stream=True)
+
+            if response.status_code == 200:
+                content_type = response.headers.get('content-type', '')
+                if 'jpeg' in content_type or 'jpg' in content_type:
+                    extension = '.jpg'
+                elif 'png' in content_type:
+                    extension = '.png'
+                elif 'webp' in content_type:
+                    extension = '.webp'
+                else:
+                    extension = '.jpg'
+
+                file_path = self.images_dir / f"{sanitized_name}{extension}"
+
+                with open(file_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+
+                self.logger.info(f"Downloaded image: {file_path}")
+                return f"03_Resources/source_material/ArtistPortraits/{sanitized_name}{extension}"
+
+        except Exception as e:
+            self.logger.error(f"Error downloading image for {artist_name}: {e}")
+
+        return ""
+
+    def sanitize_filename(self, name: str) -> str:
+        """Sanitize artist name for use as filename."""
+        sanitized = name.replace(' ', '_')
+        sanitized = re.sub(r'[<>:"/\\|?*]', '', sanitized)
+        sanitized = re.sub(r'[&]', 'and', sanitized)
+        sanitized = re.sub(r'[^\w\-_.]', '', sanitized)
+
+        if len(sanitized) > 200:
+            sanitized = sanitized[:200]
+
+        return sanitized.strip('.')
+
+    def generate_artist_card(self, artist_name: str) -> bool:
+        """
+        Generate a comprehensive artist card.
+
+        Args:
+            artist_name: Name of the artist
+
+        Returns:
+            True if card was successfully generated, False otherwise
+        """
+        self.logger.info(f"Generating artist card for: {artist_name}")
+
+        # Check if card already exists
+        sanitized_name = self.sanitize_filename(artist_name)
+        card_path = self.output_dir / f"{sanitized_name}.md"
+
+        if card_path.exists():
+            self.logger.info(f"Artist card already exists: {card_path}")
+            return True
+
+        # Fetch Spotify data
+        spotify_artist = self.search_spotify_artist(artist_name)
+        if not spotify_artist:
+            self.logger.error(f"Could not find {artist_name} on Spotify")
+            return False
+
+        artist_id = spotify_artist['id']
+
+        # Gather all Spotify data
+        albums = self.get_artist_albums(artist_id)
+        top_tracks = self.get_artist_top_tracks(artist_id)
+        related_artists = self.get_related_artists(artist_id)
+
+        # Download artist image
+        image_path = ""
+        if spotify_artist.get('images'):
+            image_url = spotify_artist['images'][0]['url']
+            image_path = self.download_artist_image(image_url, spotify_artist['name'])
+
+        # Fetch biography data
+        biography = ""
+        biography_source = "none"
+        wikipedia_url = ""
+        musicbrainz_url = ""
+
+        # Try Wikipedia first
+        wikipedia_title = self.wikipedia_api.search_artist(artist_name)
+        if wikipedia_title:
+            wiki_data = self.wikipedia_api.get_page_summary(wikipedia_title)
+            if wiki_data.get('biography'):
+                biography = wiki_data['biography']
+                biography_source = "wikipedia"
+                wikipedia_url = wiki_data.get('wikipedia_url', '')
+
+        # Try MusicBrainz as fallback
+        if not biography:
+            mb_artist = self.musicbrainz_api.search_artist(artist_name)
+            if mb_artist:
+                mb_details = self.musicbrainz_api.get_artist_details(mb_artist['id'])
+                if mb_details.get('biography'):
+                    biography = mb_details['biography']
+                    biography_source = "musicbrainz"
+                    musicbrainz_url = mb_details.get('musicbrainz_url', '')
+
+        # Build the artist card
+        card_content = self.build_artist_card(
+            spotify_artist=spotify_artist,
+            albums=albums,
+            top_tracks=top_tracks,
+            related_artists=related_artists,
+            biography=biography,
+            biography_source=biography_source,
+            wikipedia_url=wikipedia_url,
+            musicbrainz_url=musicbrainz_url,
+            image_path=image_path
+        )
+
+        # Save the card
+        with open(card_path, 'w', encoding='utf-8') as f:
+            f.write(card_content)
+
+        self.logger.info(f"Successfully generated artist card: {card_path}")
+        return True
+
+    def build_artist_card(self, **kwargs) -> str:
+        """Build the markdown content for the artist card."""
+        artist = kwargs['spotify_artist']
+        albums = kwargs['albums']
+        top_tracks = kwargs['top_tracks']
+        related_artists = kwargs['related_artists']
+        biography = kwargs['biography']
+        biography_source = kwargs['biography_source']
+        wikipedia_url = kwargs['wikipedia_url']
+        musicbrainz_url = kwargs['musicbrainz_url']
+        image_path = kwargs['image_path']
+
+        # Prepare data for template
+        name = artist['name']
+        genres = artist.get('genres', [])
+        popularity = artist.get('popularity', 0)
+        followers = artist.get('followers', {}).get('total', 0)
+        spotify_url = artist.get('external_urls', {}).get('spotify', '')
+
+        # Separate albums and singles
+        album_list = [a for a in albums if a.get('album_type') == 'album']
+        single_list = [a for a in albums if a.get('album_type') == 'single']
+
+        # Format top tracks
+        top_track_names = []
+        for track in top_tracks[:10]:
+            track_name = track.get('name', '')
+            album_name = track.get('album', {}).get('name', '')
+            top_track_names.append(f"{track_name} ({album_name})")
+
+        # Format related artists
+        related_artist_names = [a.get('name', '') for a in related_artists[:10]]
+
+        # Build YAML frontmatter
+        frontmatter = f"""---
+title: {name}
+aliases: []
+status: active
+genres: {json.dumps(genres[:10]) if genres else '[]'}
+spotify_data:
+  id: {artist['id']}
+  url: {spotify_url}
+  popularity: {popularity}
+  followers: {followers}
+  verified: false
+albums_count: {len(album_list)}
+singles_count: {len(single_list)}
+top_tracks: {json.dumps(top_track_names[:5]) if top_track_names else '[]'}
+related_artists: {json.dumps(related_artist_names[:5]) if related_artist_names else '[]'}
+biography_source: {biography_source}
+external_urls:
+  spotify: {spotify_url}
+  wikipedia: {wikipedia_url}
+  musicbrainz: {musicbrainz_url}
+image_path: {image_path}
+entry_created: {datetime.now().isoformat()}
+last_updated: {datetime.now().isoformat()}
+---
+
+"""
+
+        # Build markdown content
+        content = f"""![]({image_path.split('/')[-1] if image_path else ''})
+
+# {name}
+
+## Quick Info
+- **Genres**: {', '.join(genres[:5]) if genres else 'Not specified'}
+- **Spotify Popularity**: {popularity}/100
+- **Followers**: {followers:,}
+
+## Biography
+{biography if biography else 'No biography available.'}
+
+"""
+
+        if biography_source == 'wikipedia' and wikipedia_url:
+            content += f"*Source: [Wikipedia]({wikipedia_url})*\n\n"
+        elif biography_source == 'musicbrainz' and musicbrainz_url:
+            content += f"*Source: [MusicBrainz]({musicbrainz_url})*\n\n"
+
+        # Add discography
+        if album_list or single_list:
+            content += "## Discography\n\n"
+
+            if album_list:
+                content += "### Albums\n"
+                content += "| Title | Release Date | Type |\n"
+                content += "|-------|--------------|------|\n"
+
+                for album in album_list[:20]:  # Limit to 20 albums
+                    title = album.get('name', 'Unknown')
+                    date = album.get('release_date', 'Unknown')
+                    album_type = album.get('album_type', 'album').title()
+                    content += f"| {title} | {date} | {album_type} |\n"
+
+                content += "\n"
+
+        # Add top tracks
+        if top_tracks:
+            content += "### Top Tracks\n"
+            for i, track in enumerate(top_tracks[:10], 1):
+                track_name = track.get('name', '')
+                album_name = track.get('album', {}).get('name', '')
+                content += f"{i}. {track_name} ({album_name})\n"
+            content += "\n"
+
+        # Add related artists
+        if related_artists:
+            content += "## Related Artists\n"
+            for artist in related_artists[:10]:
+                artist_name = artist.get('name', '')
+                content += f"- [[{artist_name}]]\n"
+            content += "\n"
+
+        # Add external links
+        content += "## External Links\n"
+        if spotify_url:
+            content += f"- [Spotify]({spotify_url})\n"
+        if wikipedia_url:
+            content += f"- [Wikipedia]({wikipedia_url})\n"
+        if musicbrainz_url:
+            content += f"- [MusicBrainz]({musicbrainz_url})\n"
+
+        return frontmatter + content
+
+    def process_daily_archive(self, input_file: str) -> Dict[str, int]:
+        """Process a daily archive file and generate artist cards."""
+        self.logger.info(f"Processing daily archive: {input_file}")
+
+        # Parse the markdown file to get artists
+        artists = self.parse_daily_archive(input_file)
+        if not artists:
+            self.logger.error("No artists found in the daily archive file")
+            return {"total": 0, "success": 0, "failed": 0}
+
+        # Authenticate with Spotify
+        if not self.authenticate_spotify():
+            self.logger.error("Failed to authenticate with Spotify")
+            return {"total": len(artists), "success": 0, "failed": len(artists)}
+
+        # Generate cards for each artist
+        stats = {"total": len(artists), "success": 0, "failed": 0}
+
+        for i, artist in enumerate(artists, 1):
+            self.logger.info(f"Processing artist {i}/{len(artists)}: {artist}")
+
+            success = self.generate_artist_card(artist)
+            if success:
+                stats["success"] += 1
+            else:
+                stats["failed"] += 1
+
+            # Rate limiting
+            time.sleep(RATE_LIMIT_DELAY)
+
+        self.logger.info(f"Processing complete. Total: {stats['total']}, "
+                        f"Success: {stats['success']}, Failed: {stats['failed']}")
+
+        return stats
+
+    def parse_daily_archive(self, file_path: str) -> List[str]:
+        """Parse the Obsidian daily archive markdown file and extract artists."""
+        try:
+            with open(file_path, 'r', encoding='utf-8') as file:
+                content = file.read()
+
+            lines = content.split('\n')
+            found_artists = []
+
+            for line in lines:
+                line = line.strip()
+
+                if not line:
+                    continue
+
+                if line.startswith('|') and '|' in line[1:]:
+                    columns = [col.strip() for col in line.split('|')]
+
+                    if len(columns) >= 9 and columns[1] not in ['Time', ':----', '']:
+                        artist = columns[2].strip()
+                        status = columns[8].strip()
+
+                        if status == "✅ Found" and artist:
+                            found_artists.append(artist)
+                            self.logger.debug(f"Found artist: {artist}")
+
+            self.logger.info(f"Parsed {len(found_artists)} artists from {file_path}")
+            return found_artists
+
+        except Exception as e:
+            self.logger.error(f"Failed to parse daily archive file {file_path}: {e}")
+            return []
+
+
+def main():
+    """Main entry point for the script."""
+    parser = argparse.ArgumentParser(
+        description="Generate comprehensive artist cards for Obsidian vault"
+    )
+
+    # Mutually exclusive group for input mode
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument(
+        "--artist",
+        help="Single artist name to generate card for"
+    )
+    input_group.add_argument(
+        "--input-file",
+        help="Path to daily archive markdown file with multiple artists"
+    )
+
+    parser.add_argument(
+        "--output-dir",
+        required=True,
+        help="Directory to save generated artist cards"
+    )
+    parser.add_argument(
+        "--images-dir",
+        help="Directory to save artist images (default: relative to output-dir)"
+    )
+    parser.add_argument(
+        "--log-level",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        default="INFO",
+        help="Logging level"
+    )
+
+    args = parser.parse_args()
+
+    # Set logging level
+    logging.getLogger().setLevel(getattr(logging, args.log_level))
+
+    # Create generator
+    generator = SpotifyArtistCardGenerator(args.output_dir, args.images_dir)
+
+    # Process based on input mode
+    if args.artist:
+        # Single artist mode
+        success = generator.generate_artist_card(args.artist)
+        if success:
+            print(f"✅ Successfully generated artist card for: {args.artist}")
+        else:
+            print(f"❌ Failed to generate artist card for: {args.artist}")
+            sys.exit(1)
+
+    else:
+        # Batch mode from file
+        if not os.path.exists(args.input_file):
+            print(f"Error: Input file does not exist: {args.input_file}")
+            sys.exit(1)
+
+        stats = generator.process_daily_archive(args.input_file)
+
+        print(f"\nProcessing Summary:")
+        print(f"Total artists: {stats['total']}")
+        print(f"Successfully generated: {stats['success']}")
+        print(f"Failed: {stats['failed']}")
+
+
+if __name__ == "__main__":
+    main()
