@@ -174,7 +174,7 @@ class WikipediaAPI:
                 'exintro': True,
                 'explaintext': True,
                 'exsectionformat': 'plain',
-                'exchars': 1000
+                'exchars': 2500
             }
 
             response = self.session.get(api_url, params=params, timeout=REQUEST_TIMEOUT)
@@ -234,10 +234,15 @@ class WikipediaAPI:
             'birth_date': '',
             'death_date': '',
             'birth_place': '',
+            'birth_name': '',
+            'also_known_as': [],
+            'occupation': [],
             'origin': '',
             'instruments': [],
             'years_active': '',
-            'associated_acts': []
+            'associated_acts': [],
+            'record_labels': [],
+            'spouse': []
         }
 
         try:
@@ -271,10 +276,15 @@ class WikipediaAPI:
             'birth_date': '',
             'death_date': '',
             'birth_place': '',
+            'birth_name': '',
+            'also_known_as': [],
+            'occupation': [],
             'origin': '',
             'instruments': [],
             'years_active': '',
-            'associated_acts': []
+            'associated_acts': [],
+            'record_labels': [],
+            'spouse': []
         }
 
         try:
@@ -306,6 +316,16 @@ class WikipediaAPI:
                     data['years_active'] = value
                 elif 'associated acts' in label or 'associated' in label:
                     data['associated_acts'] = self._parse_list_field(value)
+                elif 'birth name' in label or 'real name' in label:
+                    data['birth_name'] = value
+                elif 'also known as' in label or 'aliases' in label or 'nickname' in label:
+                    data['also_known_as'] = self._parse_list_field(value)
+                elif 'occupation' in label or 'profession' in label or 'genre' in label:
+                    data['occupation'] = self._parse_list_field(value)
+                elif 'label' in label and 'record' in label or 'labels' in label:
+                    data['record_labels'] = self._parse_list_field(value)
+                elif 'spouse' in label or 'partner' in label or 'married' in label:
+                    data['spouse'] = self._parse_list_field(value)
 
         except Exception as e:
             self.logger.error(f"Error parsing infobox table: {e}")
@@ -319,10 +339,15 @@ class WikipediaAPI:
             'birth_date': '',
             'death_date': '',
             'birth_place': '',
+            'birth_name': '',
+            'also_known_as': [],
+            'occupation': [],
             'origin': '',
             'instruments': [],
             'years_active': '',
-            'associated_acts': []
+            'associated_acts': [],
+            'record_labels': [],
+            'spouse': []
         }
 
     def _parse_birth_info(self, birth_text: str) -> Dict[str, str]:
@@ -358,6 +383,139 @@ class WikipediaAPI:
         # Split by common separators and clean up
         items = re.split(r'[,\n]', text)
         return [item.strip() for item in items if item.strip()]
+
+    def get_infobox_via_action_api(self, page_title: str) -> Dict[str, Any]:
+        """
+        Get infobox data using Wikipedia Action API.
+
+        Args:
+            page_title: Wikipedia page title
+
+        Returns:
+            Dictionary with extracted infobox data
+        """
+        extracted = {
+            'birth_date': '',
+            'death_date': '',
+            'birth_place': '',
+            'birth_name': '',
+            'also_known_as': [],
+            'occupation': [],
+            'origin': '',
+            'instruments': [],
+            'years_active': '',
+            'associated_acts': [],
+            'record_labels': [],
+            'spouse': []
+        }
+
+        try:
+            # Use Wikipedia Action API to get page content
+            action_api_url = "https://en.wikipedia.org/w/api.php"
+            params = {
+                'action': 'query',
+                'prop': 'revisions',
+                'titles': page_title,
+                'rvprop': 'content',
+                'format': 'json',
+                'formatversion': '2',
+                'rvslots': 'main'
+            }
+
+            response = self.session.get(action_api_url, params=params, timeout=REQUEST_TIMEOUT)
+
+            self.logger.debug(f"Action API response status: {response.status_code}")
+
+            if response.status_code == 200:
+                data = response.json()
+                pages = data.get('query', {}).get('pages', [])
+
+                if pages and len(pages) > 0:
+                    page = pages[0]
+                    revisions = page.get('revisions', [])
+
+                    if revisions and len(revisions) > 0:
+                        content = revisions[0].get('slots', {}).get('main', {}).get('content', '')
+
+                        if content:
+                            # Parse the wikitext for infobox data
+                            extracted.update(self._parse_wikitext_infobox(content))
+                            self.logger.debug(f"Action API extracted data: {extracted}")
+                else:
+                    self.logger.warning("Action API returned 200 but no pages found")
+            else:
+                self.logger.warning(f"Action API failed with status {response.status_code}")
+
+        except Exception as e:
+            self.logger.error(f"Error getting infobox via Action API: {e}")
+
+        return extracted
+
+    def _parse_wikitext_infobox(self, wikitext: str) -> Dict[str, Any]:
+        """
+        Parse wikitext to extract infobox data.
+
+        Args:
+            wikitext: Raw wikitext content
+
+        Returns:
+            Dictionary with extracted data
+        """
+        import re
+
+        data = {}
+
+        # Extract years active - handle various formats
+        years_pattern = r'\|\s*years[_\s]active\s*=\s*([^\|]*?)(?=\n|\|)'
+        years_match = re.search(years_pattern, wikitext, re.IGNORECASE)
+        if years_match:
+            years_text = years_match.group(1).strip()
+            # Clean up the text - remove references, links, etc.
+            years_text = re.sub(r'\[\[([^\]]+)\]\]', r'\1', years_text)  # Remove wiki links
+            years_text = re.sub(r'<[^>]+>', '', years_text)  # Remove HTML tags
+            years_text = re.sub(r'\{\{[^}]+\}\}', '', years_text)  # Remove templates
+            years_text = re.sub(r'<ref[^>]*>.*?</ref>', '', years_text)  # Remove references
+            years_text = years_text.strip()
+            if years_text:
+                data['years_active'] = years_text
+                self.logger.debug(f"Extracted years_active from wikitext: {years_text}")
+
+        # Extract other useful fields
+        # Birth date
+        birth_pattern = r'\|\s*birth[_\s]date\s*=\s*([^\|]*?)(?=\n|\|)'
+        birth_match = re.search(birth_pattern, wikitext, re.IGNORECASE)
+        if birth_match:
+            birth_text = birth_match.group(1).strip()
+            # Extract date from templates like {{birth date|1926|09|23}}
+            date_template_match = re.search(r'\{\{[^|]+\|(\d{4})\|(\d{1,2})\|(\d{1,2})', birth_text)
+            if date_template_match:
+                year, month, day = date_template_match.groups()
+                data['birth_date'] = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+
+        # Death date
+        death_pattern = r'\|\s*death[_\s]date\s*=\s*([^\|]*?)(?=\n|\|)'
+        death_match = re.search(death_pattern, wikitext, re.IGNORECASE)
+        if death_match:
+            death_text = death_match.group(1).strip()
+            # Extract date from templates
+            date_template_match = re.search(r'\{\{[^|]+\|(\d{4})\|(\d{1,2})\|(\d{1,2})', death_text)
+            if date_template_match:
+                year, month, day = date_template_match.groups()
+                data['death_date'] = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+
+        # Instruments
+        instruments_pattern = r'\|\s*instruments?\s*=\s*([^\|]*?)(?=\n|\|)'
+        instruments_match = re.search(instruments_pattern, wikitext, re.IGNORECASE)
+        if instruments_match:
+            instruments_text = instruments_match.group(1).strip()
+            # Clean up and split
+            instruments_text = re.sub(r'\[\[([^\]]+)\]\]', r'\1', instruments_text)
+            instruments_text = re.sub(r'<[^>]+>', '', instruments_text)
+            instruments = [i.strip() for i in re.split(r'[,\n•]', instruments_text) if i.strip()]
+            if instruments:
+                data['instruments'] = instruments
+
+        return data
 
     def get_wikidata_entity(self, wikipedia_url: str) -> Optional[str]:
         """
@@ -412,9 +570,14 @@ class WikipediaAPI:
             'birth_date': '',
             'death_date': '',
             'birth_place': '',
+            'birth_name': '',
+            'also_known_as': [],
+            'occupation': [],
             'instruments': [],
             'years_active': '',
-            'associated_acts': []
+            'associated_acts': [],
+            'record_labels': [],
+            'spouse': []
         }
 
         try:
@@ -452,17 +615,67 @@ class WikipediaAPI:
                     instruments = self._extract_wikidata_labels(claims['P1303'])
                     structured_data['instruments'] = instruments
 
+                # P1477: Birth name
+                if 'P1477' in claims:
+                    birth_name = self._extract_wikidata_text(claims['P1477'])
+                    if birth_name:
+                        structured_data['birth_name'] = birth_name
+
+                # P742: Pseudonym (also known as)
+                if 'P742' in claims:
+                    aliases = self._extract_wikidata_text_list(claims['P742'])
+                    self.logger.debug(f"Found P742 pseudonyms: {aliases}")
+                    structured_data['also_known_as'].extend(aliases)
+                else:
+                    self.logger.debug("P742 (pseudonym) not found in claims")
+
+                # P1449: Nickname (nicknames like "Trane")
+                if 'P1449' in claims:
+                    nicknames = self._extract_wikidata_text_list(claims['P1449'])
+                    self.logger.debug(f"Found P1449 nicknames: {nicknames}")
+                    structured_data['also_known_as'].extend(nicknames)
+                else:
+                    self.logger.debug("P1449 (nickname) not found in claims")
+
+                # P106: Occupation
+                if 'P106' in claims:
+                    occupation = self._extract_wikidata_labels(claims['P106'])
+                    structured_data['occupation'] = occupation
+
+                # P264: Record label
+                if 'P264' in claims:
+                    record_labels = self._extract_wikidata_labels(claims['P264'])
+                    structured_data['record_labels'] = record_labels
+
+                # P26: Spouse
+                if 'P26' in claims:
+                    spouse = self._extract_wikidata_labels(claims['P26'])
+                    structured_data['spouse'] = spouse
+
+                # P527: Has part(s) - for band members / associated acts
+                if 'P527' in claims:
+                    associated_acts = self._extract_wikidata_labels(claims['P527'])
+                    structured_data['associated_acts'].extend(associated_acts)
+
+                # P361: Part of - for bands the artist was part of
+                if 'P361' in claims:
+                    part_of = self._extract_wikidata_labels(claims['P361'])
+                    structured_data['associated_acts'].extend(part_of)
+
                 # P2032: Work period start, P2034: Work period end
                 start_year = ''
                 end_year = ''
                 if 'P2032' in claims:
                     start_year = self._extract_wikidata_year(claims['P2032'])
+                    self.logger.debug(f"Extracted work period start: {start_year}")
                 if 'P2034' in claims:
                     end_year = self._extract_wikidata_year(claims['P2034'])
+                    self.logger.debug(f"Extracted work period end: {end_year}")
 
                 if start_year:
                     if end_year:
                         structured_data['years_active'] = f"{start_year}-{end_year}"
+                        self.logger.debug(f"Years active from work periods: {start_year}-{end_year}")
                     else:
                         # If no end year but we have death date, use death year
                         death_year = ''
@@ -471,11 +684,26 @@ class WikipediaAPI:
 
                         if death_year:
                             structured_data['years_active'] = f"{start_year}-{death_year}"
+                            self.logger.debug(f"Years active using death date: {start_year}-{death_year}")
                         else:
                             structured_data['years_active'] = f"{start_year}-present"
+                            self.logger.debug(f"Years active (ongoing): {start_year}-present")
+                else:
+                    # Fallback: try to estimate from biographical text or use birth/death years
+                    if structured_data.get('birth_date') and structured_data.get('death_date'):
+                        birth_year = structured_data['birth_date'][:4]
+                        death_year = structured_data['death_date'][:4]
+                        # Assume career started around age 20-25 for musicians
+                        estimated_start = str(int(birth_year) + 20)
+                        structured_data['years_active'] = f"{estimated_start}-{death_year}"
+                        self.logger.debug(f"Years active estimated from birth/death: {estimated_start}-{death_year}")
 
         except Exception as e:
             self.logger.error(f"Error getting Wikidata claims for {entity_id}: {e}")
+
+        # Log final alias collection
+        final_aliases = structured_data.get('also_known_as', [])
+        self.logger.debug(f"Final collected aliases: {final_aliases}")
 
         return structured_data
 
@@ -514,16 +742,152 @@ class WikipediaAPI:
         return ''
 
     def _extract_wikidata_label(self, claims: List) -> str:
-        """Extract label from Wikidata claims."""
-        # This would need to make additional API calls to get labels
-        # For now, return empty string
+        """
+        Extract single label from Wikidata claims.
+
+        Args:
+            claims: List of Wikidata claims for a property
+
+        Returns:
+            Human-readable label string or empty string if not found
+        """
+        if not claims:
+            return ''
+
+        try:
+            # Get the first claim's entity ID
+            first_claim = claims[0]
+            if 'mainsnak' in first_claim and 'datavalue' in first_claim['mainsnak']:
+                datavalue = first_claim['mainsnak']['datavalue']
+                if datavalue.get('type') == 'wikibase-entityid':
+                    entity_id = datavalue['value']['id']
+                    return self._get_entity_label(entity_id)
+        except Exception as e:
+            self.logger.error(f"Error extracting Wikidata label: {e}")
+
         return ''
 
     def _extract_wikidata_labels(self, claims: List) -> List[str]:
-        """Extract multiple labels from Wikidata claims."""
-        # This would need to make additional API calls to get labels
-        # For now, return empty list
-        return []
+        """
+        Extract multiple labels from Wikidata claims.
+
+        Args:
+            claims: List of Wikidata claims for a property
+
+        Returns:
+            List of human-readable label strings
+        """
+        labels = []
+
+        try:
+            for claim in claims[:5]:  # Limit to first 5 to avoid too many API calls
+                if 'mainsnak' in claim and 'datavalue' in claim['mainsnak']:
+                    datavalue = claim['mainsnak']['datavalue']
+                    if datavalue.get('type') == 'wikibase-entityid':
+                        entity_id = datavalue['value']['id']
+                        label = self._get_entity_label(entity_id)
+                        if label:
+                            labels.append(label)
+        except Exception as e:
+            self.logger.error(f"Error extracting Wikidata labels: {e}")
+
+        return labels
+
+    def _get_entity_label(self, entity_id: str) -> str:
+        """
+        Get human-readable label for a Wikidata entity ID.
+
+        Args:
+            entity_id: Wikidata entity ID (e.g., 'Q123456')
+
+        Returns:
+            Human-readable label or empty string if not found
+        """
+        try:
+            # Use Wikidata Special:EntityData API to get entity information
+            entity_url = f"https://www.wikidata.org/wiki/Special:EntityData/{entity_id}.json"
+
+            response = self.session.get(entity_url, timeout=REQUEST_TIMEOUT)
+            time.sleep(RATE_LIMIT_DELAY)  # Rate limiting
+
+            if response.status_code == 200:
+                data = response.json()
+                entities = data.get('entities', {})
+
+                if entity_id in entities:
+                    entity = entities[entity_id]
+                    labels = entity.get('labels', {})
+
+                    # Try to get English label first
+                    if 'en' in labels:
+                        return labels['en']['value']
+
+                    # Fallback to any available label
+                    if labels:
+                        first_label = next(iter(labels.values()))
+                        return first_label['value']
+            else:
+                self.logger.warning(f"Failed to get entity data for {entity_id}: {response.status_code}")
+
+        except Exception as e:
+            self.logger.error(f"Error getting entity label for {entity_id}: {e}")
+
+        return ''
+
+    def _extract_wikidata_text(self, claims: List) -> str:
+        """
+        Extract text value from Wikidata claims.
+
+        Args:
+            claims: List of Wikidata claims for a text property
+
+        Returns:
+            Text string or empty string if not found
+        """
+        if not claims:
+            return ''
+
+        try:
+            first_claim = claims[0]
+            if 'mainsnak' in first_claim and 'datavalue' in first_claim['mainsnak']:
+                datavalue = first_claim['mainsnak']['datavalue']
+                if datavalue.get('type') == 'string':
+                    return datavalue['value']
+                elif datavalue.get('type') == 'monolingualtext':
+                    return datavalue['value']['text']
+        except Exception as e:
+            self.logger.error(f"Error extracting Wikidata text: {e}")
+
+        return ''
+
+    def _extract_wikidata_text_list(self, claims: List) -> List[str]:
+        """
+        Extract multiple text values from Wikidata claims.
+
+        Args:
+            claims: List of Wikidata claims for text properties
+
+        Returns:
+            List of text strings
+        """
+        texts = []
+
+        try:
+            for claim in claims[:5]:  # Limit to first 5
+                if 'mainsnak' in claim and 'datavalue' in claim['mainsnak']:
+                    datavalue = claim['mainsnak']['datavalue']
+                    text = ''
+                    if datavalue.get('type') == 'string':
+                        text = datavalue['value']
+                    elif datavalue.get('type') == 'monolingualtext':
+                        text = datavalue['value']['text']
+
+                    if text:
+                        texts.append(text)
+        except Exception as e:
+            self.logger.error(f"Error extracting Wikidata text list: {e}")
+
+        return texts
 
     def get_artist_structured_data(self, artist_name: str) -> Dict[str, Any]:
         """
@@ -549,6 +913,14 @@ class WikipediaAPI:
 
         if mobile_data:
             structured_data = self.extract_infobox_data(mobile_data)
+        else:
+            # Mobile sections failed (403 error), try Action API
+            self.logger.info(f"Mobile sections failed, trying Action API for {page_title}")
+            action_api_data = self.get_infobox_via_action_api(page_title)
+            self.logger.debug(f"Action API data received: {action_api_data}")
+            if action_api_data:
+                structured_data = action_api_data
+                self.logger.debug(f"Using Action API data for structured_data: {structured_data.get('years_active', 'NOT FOUND')}")
 
         # Try to get Wikidata for more reliable structured data
         wikipedia_url = summary_data.get('wikipedia_url', '')
@@ -556,9 +928,17 @@ class WikipediaAPI:
             entity_id = self.get_wikidata_entity(wikipedia_url)
             if entity_id:
                 wikidata_structured = self.get_wikidata_claims(entity_id)
-                # Merge with preference for Wikidata (more reliable)
+                # Merge with preference for Wikidata (more reliable) but keep years_active from Wikipedia if present
                 for key, value in wikidata_structured.items():
                     if value:  # Only override if Wikidata has a value
+                        # Keep Wikipedia years_active if it exists and looks more complete
+                        if key == 'years_active':
+                            wiki_years = structured_data.get('years_active', '')
+                            # Prefer Wikipedia if it has a range (e.g., "1945-1967" or "1945–1967") over estimated values
+                            # Check for both regular hyphen and en-dash
+                            if wiki_years and ('-' in wiki_years or '–' in wiki_years):
+                                self.logger.debug(f"Keeping Wikipedia years_active: {wiki_years} over Wikidata: {value}")
+                                continue
                         structured_data[key] = value
 
         # Combine all data
@@ -984,10 +1364,15 @@ class SpotifyArtistCardGenerator:
         birth_date = wikipedia_data.get('birth_date', '')
         death_date = wikipedia_data.get('death_date', '')
         birth_place = wikipedia_data.get('birth_place', '')
+        birth_name = wikipedia_data.get('birth_name', '')
+        also_known_as = wikipedia_data.get('also_known_as', [])
+        occupation = wikipedia_data.get('occupation', [])
         origin = wikipedia_data.get('origin', '')
         instruments = wikipedia_data.get('instruments', [])
         years_active = wikipedia_data.get('years_active', '')
         associated_acts = wikipedia_data.get('associated_acts', [])
+        record_labels = wikipedia_data.get('record_labels', [])
+        spouse = wikipedia_data.get('spouse', [])
 
         # Try MusicBrainz as fallback
         musicbrainz_url = ""
@@ -1014,10 +1399,15 @@ class SpotifyArtistCardGenerator:
             birth_date=birth_date,
             death_date=death_date,
             birth_place=birth_place,
+            birth_name=birth_name,
+            also_known_as=also_known_as,
+            occupation=occupation,
             origin=origin,
             instruments=instruments,
             years_active=years_active,
-            associated_acts=associated_acts
+            associated_acts=associated_acts,
+            record_labels=record_labels,
+            spouse=spouse
         )
 
         # Save the card
@@ -1043,10 +1433,15 @@ class SpotifyArtistCardGenerator:
         birth_date = kwargs.get('birth_date', '')
         death_date = kwargs.get('death_date', '')
         birth_place = kwargs.get('birth_place', '')
+        birth_name = kwargs.get('birth_name', '')
+        also_known_as = kwargs.get('also_known_as', [])
+        occupation = kwargs.get('occupation', [])
         origin = kwargs.get('origin', '')
         instruments = kwargs.get('instruments', [])
         years_active = kwargs.get('years_active', '')
         associated_acts = kwargs.get('associated_acts', [])
+        record_labels = kwargs.get('record_labels', [])
+        spouse = kwargs.get('spouse', [])
 
         # Prepare data for template
         name = artist['name']
@@ -1069,11 +1464,14 @@ class SpotifyArtistCardGenerator:
         # Format related artists
         related_artist_names = [a.get('name', '') for a in related_artists[:10]]
 
+        # Determine status based on whether artist is deceased
+        status = "deceased" if death_date else "active"
+
         # Build YAML frontmatter
         frontmatter = f"""---
 title: {name}
-aliases: []
-status: active
+aliases: {json.dumps(also_known_as) if also_known_as else '[]'}
+status: {status}
 genres: {json.dumps(genres[:10]) if genres else '[]'}
 spotify_data:
   id: {artist['id']}
@@ -1094,6 +1492,12 @@ biography_source: {biography_source}"""
             frontmatter += f"\ndeath_date: \"{death_date}\""
         if birth_place:
             frontmatter += f"\nbirth_place: \"{birth_place}\""
+        if birth_name:
+            frontmatter += f"\nbirth_name: \"{birth_name}\""
+        if also_known_as:
+            frontmatter += f"\nalso_known_as: {json.dumps(also_known_as[:5])}"
+        if occupation:
+            frontmatter += f"\noccupation: {json.dumps(occupation[:5])}"
         if origin:
             frontmatter += f"\norigin: \"{origin}\""
         if instruments:
@@ -1102,6 +1506,10 @@ biography_source: {biography_source}"""
             frontmatter += f"\nyears_active: \"{years_active}\""
         if associated_acts:
             frontmatter += f"\nassociated_acts: {json.dumps(associated_acts[:10])}"
+        if record_labels:
+            frontmatter += f"\nrecord_labels: {json.dumps(record_labels[:10])}"
+        if spouse:
+            frontmatter += f"\nspouse: {json.dumps(spouse[:5])}"
 
         frontmatter += f"""
 external_urls:
@@ -1124,6 +1532,10 @@ last_updated: {datetime.now().isoformat()}
 - **Genres**: {', '.join(genres[:5]) if genres else 'Not specified'}"""
 
         # Add structured data to Quick Info if available
+        if birth_name:
+            content += f"\n- **Birth Name**: {birth_name}"
+        if also_known_as:
+            content += f"\n- **Also Known As**: {', '.join(also_known_as[:3])}"
         if birth_date:
             content += f"\n- **Born**: {birth_date}"
             if birth_place:
@@ -1132,10 +1544,18 @@ last_updated: {datetime.now().isoformat()}
             content += f"\n- **Died**: {death_date}"
         if origin and origin != birth_place:
             content += f"\n- **Origin**: {origin}"
+        if occupation:
+            content += f"\n- **Occupation**: {', '.join(occupation[:3])}"
         if instruments:
             content += f"\n- **Instruments**: {', '.join(instruments[:5])}"
         if years_active:
             content += f"\n- **Years Active**: {years_active}"
+        if record_labels:
+            content += f"\n- **Record Labels**: {', '.join(record_labels[:5])}"
+        if spouse:
+            content += f"\n- **Spouse**: {', '.join(spouse[:2])}"
+        if associated_acts:
+            content += f"\n- **Associated Acts**: {', '.join(associated_acts[:5])}"
 
         content += f"""
 - **Spotify Popularity**: {popularity}/100
