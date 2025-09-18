@@ -63,7 +63,7 @@ class WikipediaAPI:
 
     def search_artist(self, artist_name: str) -> Optional[str]:
         """
-        Search for artist Wikipedia page.
+        Search for artist Wikipedia page with enhanced accuracy.
 
         Args:
             artist_name: Name of the artist to search for
@@ -72,37 +72,48 @@ class WikipediaAPI:
             Wikipedia page title if found, None otherwise
         """
         try:
-            # First try with REST API search
-            search_url = f"{WIKIMEDIA_CORE_API}/en/search/page"
-            params = {
-                'q': artist_name,
-                'limit': 3
-            }
+            # Try multiple search strategies
+            search_queries = [
+                artist_name,  # Original name
+                f"{artist_name} band",  # For bands
+                f"{artist_name} musician",  # For solo artists
+                f"{artist_name} music group"  # Alternative for bands
+            ]
 
-            response = self.session.get(
-                search_url,
-                params=params,
-                timeout=REQUEST_TIMEOUT
-            )
+            for query in search_queries:
+                self.logger.debug(f"Searching Wikipedia with query: {query}")
 
-            if response.status_code == 200:
-                data = response.json()
-                pages = data.get('pages', [])
+                # REST API search
+                search_url = f"{WIKIMEDIA_CORE_API}/en/search/page"
+                params = {
+                    'q': query,
+                    'limit': 5
+                }
 
-                # Look for best match (case-insensitive)
-                for page in pages:
-                    title = page.get('title', '')
-                    # Check if it's likely an artist page (not a disambiguation)
-                    if artist_name.lower() in title.lower():
-                        if 'disambiguation' not in title.lower():
-                            self.logger.info(f"Found Wikipedia page: {title}")
-                            return title
+                response = self.session.get(
+                    search_url,
+                    params=params,
+                    timeout=REQUEST_TIMEOUT
+                )
 
-                # If no exact match, return first result if available
-                if pages:
-                    title = pages[0].get('title')
-                    self.logger.info(f"Using Wikipedia page: {title}")
-                    return title
+                if response.status_code == 200:
+                    data = response.json()
+                    pages = data.get('pages', [])
+
+                    # Look for best match with entity type verification
+                    best_match = self._find_best_artist_match(pages, artist_name)
+                    if best_match:
+                        self.logger.info(f"Found Wikipedia page: {best_match}")
+                        return best_match
+
+                    # If this was the original query and we found pages, check them
+                    if query == artist_name and pages:
+                        # Check if any page is likely the correct artist
+                        for page in pages:
+                            if self._is_likely_artist_page(page, artist_name):
+                                title = page.get('title')
+                                self.logger.info(f"Found likely artist page: {title}")
+                                return title
 
             self.logger.warning(f"No Wikipedia page found for {artist_name}")
             return None
@@ -110,6 +121,92 @@ class WikipediaAPI:
         except Exception as e:
             self.logger.error(f"Error searching Wikipedia for {artist_name}: {e}")
             return None
+
+    def _find_best_artist_match(self, pages: List[Dict], artist_name: str) -> Optional[str]:
+        """
+        Find the best matching artist page from search results.
+
+        Args:
+            pages: List of page results from Wikipedia search
+            artist_name: Original artist name being searched
+
+        Returns:
+            Best matching page title or None
+        """
+        artist_name_lower = artist_name.lower()
+
+        for page in pages:
+            title = page.get('title', '')
+            description = page.get('description', '')
+
+            # Handle None description
+            if description is None:
+                description = ''
+            description = description.lower()
+
+            # Skip disambiguation pages
+            if 'disambiguation' in title.lower():
+                continue
+
+            # Check if it's explicitly marked as a musical entity
+            musical_indicators = ['band', 'musician', 'singer', 'artist', 'group', 'rapper',
+                                 'composer', 'producer', 'dj', 'orchestra', 'ensemble']
+
+            # Strong match: exact name match AND musical indicator
+            if artist_name_lower == title.lower():
+                if description and any(indicator in description for indicator in musical_indicators):
+                    return title
+                # Even without description, exact match without "(album)" or "(song)" is likely correct
+                if '(album)' not in title and '(song)' not in title:
+                    return title
+
+            # Check if title contains artist name and has musical context
+            if artist_name_lower in title.lower():
+                # Avoid album/song pages
+                if '(album)' in title or '(song)' in title or 'discography' in title.lower():
+                    continue
+                # Prefer pages with musical indicators
+                if description and any(indicator in description for indicator in musical_indicators):
+                    return title
+
+        return None
+
+    def _is_likely_artist_page(self, page: Dict, artist_name: str) -> bool:
+        """
+        Check if a page is likely about the artist (not an album/song).
+
+        Args:
+            page: Wikipedia page data
+            artist_name: Artist name being searched
+
+        Returns:
+            True if likely an artist page
+        """
+        title = page.get('title', '')
+        description = page.get('description', '')
+
+        # Handle None description
+        if description is None:
+            description = ''
+        description = description.lower()
+
+        # Negative indicators (not artist pages)
+        if any(x in title for x in ['(album)', '(song)', 'discography']):
+            return False
+
+        # Positive indicators
+        musical_terms = ['band', 'musician', 'singer', 'artist', 'group',
+                        'rapper', 'composer', 'producer', 'dj']
+
+        # Check description for musical context
+        if description and any(term in description for term in musical_terms):
+            return True
+
+        # If exact name match without negative indicators
+        if artist_name.lower() == title.lower():
+            return True
+
+        return False
 
     def get_page_summary(self, page_title: str) -> Dict[str, Any]:
         """

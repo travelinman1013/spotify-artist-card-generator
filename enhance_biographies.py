@@ -115,6 +115,7 @@ class GeminiAnalyzer:
     def __init__(self, dry_run: bool = False):
         self.logger = logging.getLogger(__name__)
         self.dry_run = dry_run
+        self.wikipedia_extractor = None  # Will be set by processor
 
         # Initialize Gemini only if not in dry-run mode
         if not dry_run:
@@ -456,6 +457,93 @@ Wikipedia source:
                 "connections": {}
             }
 
+    def verify_biography_accuracy(self, artist_name: str, biography_text: str,
+                                 frontmatter: Dict[str, Any], wikipedia_url: str) -> Dict[str, Any]:
+        """
+        Verify that the biography accurately describes the artist.
+
+        Args:
+            artist_name: Name of the artist
+            biography_text: Current biography text
+            frontmatter: Artist card frontmatter with Spotify data
+            wikipedia_url: URL of Wikipedia page used
+
+        Returns:
+            Dictionary with verification results
+        """
+        if self.dry_run:
+            return {
+                "is_accurate": True,
+                "confidence": 0.95,
+                "reason": "[DRY RUN] Mock verification passed",
+                "issues": []
+            }
+
+        try:
+            # Extract key data for verification
+            spotify_genres = frontmatter.get('genres', [])
+            spotify_popularity = frontmatter.get('spotify_data', {}).get('popularity', 0)
+            top_tracks = frontmatter.get('top_tracks', [])
+
+            verification_prompt = f"""Verify if this biography accurately describes the artist "{artist_name}".
+
+ARTIST INFORMATION:
+- Name: {artist_name}
+- Spotify Genres: {', '.join(spotify_genres) if spotify_genres else 'Unknown'}
+- Top Tracks: {', '.join(top_tracks[:3]) if top_tracks else 'Unknown'}
+- Wikipedia URL: {wikipedia_url}
+
+CURRENT BIOGRAPHY:
+{biography_text}
+
+VERIFICATION TASKS:
+1. Check if the biography is about a musical artist/band (not an album or song)
+2. Verify the artist name appears prominently in the biography
+3. Check if genres mentioned align with Spotify genres: {spotify_genres}
+4. Identify any clear mismatches (e.g., biography about an album instead of artist)
+5. Check if the Wikipedia URL seems correct (e.g., not "Soul_Rebels" album for "The Soul Rebels" band)
+
+Respond in JSON:
+{{
+  "is_accurate": true/false,
+  "confidence": 0.0-1.0,
+  "entity_type": "artist" or "album" or "song" or "other",
+  "reason": "explanation",
+  "issues": ["list of specific issues found"],
+  "suggested_search": "alternative search term if inaccurate"
+}}"""
+
+            self.logger.info(f"Verifying biography accuracy for {artist_name}")
+
+            response = self.model.generate_content(
+                verification_prompt,
+                generation_config=genai.types.GenerationConfig(
+                    temperature=0.1,  # Low temperature for accuracy
+                    max_output_tokens=512
+                )
+            )
+
+            # Parse response
+            response_text = response.text.strip()
+            if response_text.startswith('```json'):
+                response_text = response_text.replace('```json', '').replace('```', '').strip()
+
+            verification = json.loads(response_text)
+
+            self.logger.info(f"Verification result for {artist_name}: {verification.get('is_accurate')} "
+                           f"(confidence: {verification.get('confidence', 0):.2f})")
+
+            return verification
+
+        except Exception as e:
+            self.logger.error(f"Error verifying biography: {e}")
+            return {
+                "is_accurate": True,  # Default to true to avoid false positives
+                "confidence": 0.5,
+                "reason": f"Verification failed: {e}",
+                "issues": []
+            }
+
 
 class ArtistCardProcessor:
     """Main processor for enhancing artist cards and managing connections."""
@@ -469,6 +557,8 @@ class ArtistCardProcessor:
         # Initialize components
         self.wikipedia_extractor = WikipediaExtractor()
         self.gemini_analyzer = GeminiAnalyzer(dry_run)
+        # Link the extractor to analyzer for re-fetching
+        self.gemini_analyzer.wikipedia_extractor = self.wikipedia_extractor
 
         # Load or initialize connections database
         self.connections_file = self.cards_dir / CONNECTIONS_FILE
@@ -495,6 +585,71 @@ class ArtistCardProcessor:
                 self.logger.warning(f"Could not load connections file: {e}")
 
         return {}
+
+    def _attempt_correct_wikipedia_fetch(self, artist_name: str, suggested_search: str = None) -> Optional[str]:
+        """
+        Attempt to fetch correct Wikipedia content using alternative search.
+
+        Args:
+            artist_name: Artist name
+            suggested_search: Alternative search term suggested by verification
+
+        Returns:
+            Wikipedia content or None if failed
+        """
+        try:
+            # Try different search strategies
+            search_terms = []
+            if suggested_search:
+                search_terms.append(suggested_search)
+
+            # Add common disambiguators for musical artists
+            search_terms.extend([
+                f"{artist_name} band",
+                f"{artist_name} musician",
+                f"{artist_name} music group",
+                f"{artist_name} American band",  # Try with nationality
+                f"{artist_name} musical group"
+            ])
+
+            for search_term in search_terms:
+                self.logger.info(f"Attempting Wikipedia search with: {search_term}")
+
+                # Use Wikipedia search API
+                search_url = "https://en.wikipedia.org/w/api.php"
+                params = {
+                    'action': 'opensearch',
+                    'search': search_term,
+                    'limit': 5,
+                    'format': 'json'
+                }
+
+                response = requests.get(search_url, params=params, timeout=30)
+                if response.status_code == 200:
+                    data = response.json()
+                    if len(data) >= 4:
+                        titles = data[1]  # List of page titles
+                        descriptions = data[2]  # List of descriptions
+                        urls = data[3]  # List of URLs
+
+                        # Find best match
+                        for i, (title, desc, url) in enumerate(zip(titles, descriptions, urls)):
+                            # Check if it's likely an artist page
+                            if any(term in desc.lower() for term in ['band', 'musician', 'group', 'singer', 'artist']):
+                                if 'album' not in title.lower() and 'song' not in title.lower():
+                                    self.logger.info(f"Found likely correct page: {title} - {desc}")
+                                    # Extract content from this URL
+                                    content = self.wikipedia_extractor.extract_full_content(url)
+                                    if content:
+                                        return content
+
+                # Brief delay between attempts
+                time.sleep(1)
+
+        except Exception as e:
+            self.logger.error(f"Error in alternative Wikipedia fetch: {e}")
+
+        return None
 
     def _save_connections(self) -> None:
         """Save connections database to file."""
@@ -696,8 +851,37 @@ class ArtistCardProcessor:
             wikipedia_url = frontmatter.get('external_urls', {}).get('wikipedia')
             current_bio = self.extract_current_biography(content)
 
-            # Extract Wikipedia content
-            wikipedia_content = self.wikipedia_extractor.extract_full_content(wikipedia_url)
+            # First, verify the current biography accuracy
+            verification = self.gemini_analyzer.verify_biography_accuracy(
+                artist_name, current_bio, frontmatter, wikipedia_url
+            )
+
+            # Rate limiting
+            time.sleep(RATE_LIMIT_DELAY)
+
+            wikipedia_content = None
+
+            # If biography is inaccurate, try to fetch correct Wikipedia page
+            if not verification.get('is_accurate', True):
+                self.logger.warning(f"Biography mismatch detected for {artist_name}: {verification.get('reason')}")
+                self.logger.info(f"Issues found: {verification.get('issues', [])}")
+
+                # Try to fetch correct Wikipedia content
+                suggested_search = verification.get('suggested_search')
+                correct_content = self._attempt_correct_wikipedia_fetch(artist_name, suggested_search)
+
+                if correct_content:
+                    wikipedia_content = correct_content
+                    self.logger.info(f"Successfully fetched correct Wikipedia content for {artist_name}")
+                    # Update the Wikipedia URL in frontmatter will be done during card update
+                else:
+                    self.logger.error(f"Could not find correct Wikipedia page for {artist_name}")
+                    self.stats['errors'] += 1
+                    return f"❌ Biography mismatch: {verification.get('reason', 'Unknown')}"
+            else:
+                # Biography is accurate, use existing Wikipedia URL
+                wikipedia_content = self.wikipedia_extractor.extract_full_content(wikipedia_url)
+
             if not wikipedia_content:
                 self.stats['errors'] += 1
                 return "❌ Wikipedia extraction failed"

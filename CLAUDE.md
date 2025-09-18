@@ -49,6 +49,8 @@ streamlit run spotify_ui.py
 - **Artist Network Extraction**: Identifies mentors, collaborators, influenced artists
 - **Jazz Encyclopedia**: Builds connected network of artist relationships
 - **Smart Skipping**: Only enhances when significant new content is available
+- **Biography Accuracy Verification**: Detects and corrects artist/album/song mismatches
+- **Automatic Re-fetching**: Finds correct Wikipedia pages when mismatches detected
 
 ## Command Line Usage
 
@@ -210,9 +212,16 @@ network_extracted: true
 
 ## Current Status (September 18, 2025)
 
-✅ **ALL MAJOR FEATURES COMPLETE + AI ENHANCEMENT**
+✅ **ALL MAJOR FEATURES COMPLETE + AI ENHANCEMENT + ACCURACY VERIFICATION**
 
-### Recently Added (September 18, 2025)
+### Recently Added (September 18, 2025 - Latest Update)
+- **Biography Accuracy Verification**: AI-powered detection of artist/album/song mismatches
+- **Enhanced Wikipedia Search**: Improved entity type detection and disambiguation
+- **Automatic Re-fetching**: Corrects mismatched biographies by finding proper Wikipedia pages
+- **Cross-reference Validation**: Verifies Wikipedia content matches Spotify metadata
+- **Fixed "The Soul Rebels"**: Corrected album/artist confusion (was pulling Bob Marley's album)
+
+### Core Features Complete
 - **enhance_biographies.py**: Complete AI-powered biography enhancement system
 - **Artist Network Analysis**: Extracts and structures musical relationships
 - **Intelligent Content Assessment**: Gemini AI evaluates enhancement value
@@ -220,10 +229,10 @@ network_extracted: true
 - **Full Testing**: Dry-run mode and real API integration verified
 
 ### Recently Fixed
+- **Wikipedia Search Accuracy**: Better disambiguation between artists and albums/songs
+- **NoneType Errors**: Fixed description field handling in Wikipedia API responses
+- **Biography Mismatches**: Now detects and auto-corrects wrong entity types
 - **Streamlit File Browser**: Fixed session state conflicts and widget key issues
-- **Modal Pattern**: Implemented proper Browse → Select → Confirm workflow
-- **File Validation**: Added comprehensive file existence and format validation
-- **End-to-End Testing**: All functionality verified working
 
 ### Known Minor Issues
 - Years active calculation needs refinement
@@ -236,4 +245,4 @@ network_extracted: true
 3. Improve Wikidata label extraction for places and instruments
 4. Add caching for API responses to reduce costs
 
-The project is feature-complete with AI-enhanced biographies and artist network analysis, forming the foundation of a comprehensive jazz encyclopedia.
+The project is feature-complete with AI-enhanced biographies, artist network analysis, and automatic accuracy verification, forming a robust foundation for a comprehensive jazz encyclopedia.
