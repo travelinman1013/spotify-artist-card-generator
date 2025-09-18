@@ -805,13 +805,16 @@ class ArtistCardProcessor:
                 self.logger.info(f"[DRY RUN] Would update {file_path.name}")
                 return True
             else:
-                # Backup original file
-                backup_path = file_path.with_suffix('.md.backup')
+                # Backup original file to backups subdirectory
+                backup_dir = file_path.parent / 'backups'
+                backup_dir.mkdir(exist_ok=True)
+                backup_path = backup_dir / f"{file_path.stem}.md.backup"
+
                 if not backup_path.exists():
-                    file_path.rename(backup_path)
-                    file_path.write_text(full_content, encoding='utf-8')
-                else:
-                    file_path.write_text(full_content, encoding='utf-8')
+                    # Copy original content to backup before modifying
+                    backup_path.write_text(file_path.read_text(encoding='utf-8'), encoding='utf-8')
+
+                file_path.write_text(full_content, encoding='utf-8')
 
                 self.logger.info(f"Updated {file_path.name}")
                 return True
