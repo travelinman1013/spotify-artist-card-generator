@@ -38,8 +38,36 @@ python3 -m venv venv
 source venv/bin/activate
 
 # Install dependencies
-pip install requests pillow
+pip install -r requirements.txt
+# OR manually install: pip install requests pillow beautifulsoup4 streamlit
 ```
+
+## ✨ NEW: Web UI Interface
+
+**spotify_ui.py**: A user-friendly Streamlit web interface for running both scripts without command-line arguments.
+
+### Quick Start with UI
+```bash
+# Activate virtual environment
+source venv/bin/activate
+
+# Launch the web interface
+streamlit run spotify_ui.py
+```
+
+The UI will open in your browser at `http://localhost:8501` and provides:
+
+- **🖼️ Image Downloader Tab**: Select archive files, configure output directories, run downloads with progress tracking
+- **📇 Artist Card Generator Tab**: Single artist or batch mode, real-time log output, progress monitoring
+- **⚙️ Settings Tab**: Save default directories, manage recent files, export logs
+
+### UI Features
+- **File Browser**: Automatically scans for daily archive files in your vault
+- **Recent Files**: Quick access to previously used archive files
+- **Default Paths**: Pre-configured with your Obsidian vault directories
+- **Progress Tracking**: Real-time progress bars and live log output
+- **Configuration**: Persistent settings saved to `spotify_ui_config.json`
+- **Log Export**: Download execution logs for debugging
 
 ## Running the Scripts
 
@@ -256,6 +284,7 @@ Quick Info display:
 - requests (for API calls)
 - pillow (for image processing)
 - beautifulsoup4 (for HTML parsing - added September 2025)
+- streamlit (for web UI - added September 2025)
 - Standard library: json, base64, pathlib, datetime, urllib, logging
 
 ## File Structure
@@ -264,6 +293,9 @@ Quick Info display:
 image_agent_v5/
 ├── spotify_image_downloader.py     # Original image downloader
 ├── spotify_artist_card_generator.py # New artist card generator
+├── spotify_ui.py                   # NEW: Streamlit web UI (September 2025)
+├── requirements.txt                # Python dependencies
+├── spotify_ui_config.json          # UI settings (auto-generated)
 ├── CLAUDE.md                        # This file
 ├── venv/                           # Python virtual environment
 └── *.log                           # Log files (gitignored)
@@ -275,16 +307,41 @@ image_agent_v5/
 - ✅ **Wikipedia/Wikidata Integration**: COMPLETE - Successfully extracting structured data (birth/death dates, biography)
 - ✅ **Enhanced Artist Cards**: COMPLETE - Rich YAML frontmatter with biographical data
 - ✅ **Single API Strategy**: COMPLETE - Using only Wikimedia/Wikipedia/Wikidata APIs
+- ✅ **Streamlit Web UI**: COMPLETE - Full-featured web interface with file browsers and progress tracking
+- ✅ **Session State Fix**: COMPLETE - Fixed Streamlit session state conflicts for stable operation
+
+### ✨ Latest Addition: Streamlit Web UI (September 18, 2025)
+**COMPLETED**: Successfully implemented and debugged a comprehensive web interface:
+
+#### **UI Features** ✅
+- **Dual-mode operation**: Image downloader and Artist card generator tabs
+- **File browser integration**: Automatically scans vault for daily archive files
+- **Recent files management**: Quick access to previously used archive files
+- **Real-time progress tracking**: Live progress bars and log output during execution
+- **Persistent configuration**: Saves default directories and settings
+- **Error handling**: Proper Streamlit session state management
+
+#### **Technical Implementation** ✅
+- **Session state management**: Fixed conflicts between widget keys and programmatic updates
+- **File discovery**: Smart scanning for archive files with date/archive patterns
+- **Command execution**: Subprocess integration with real-time output capture
+- **Configuration persistence**: JSON-based settings storage
+
+#### **Debugging Completed** ✅
+- **Problem**: `StreamlitAPIException` when trying to modify widget-bound session state
+- **Solution**: Implemented separate state variables with `st.rerun()` for file browser functionality
+- **Result**: Stable UI operation without session state conflicts
 
 ### Implementation Details
 - **WikipediaAPI.get_artist_structured_data()**: Main method combining all data sources
 - **Wikidata Claims Extraction**: Working for dates (P569/P570), needs label extraction completion
 - **Mobile Sections Fallback**: Implemented but may encounter 403 errors
 - **Rate Limiting**: Conservative (1 second delays) - can be optimized if needed
+- **UI Architecture**: Streamlit-based with tabbed interface and persistent configuration
 
 ### Minor Issues to Address
 - Years active calculation needs refinement (currently getting incorrect start dates)
 - Wikidata label extraction methods need completion for birth place and instruments
 - Mobile sections API may need User-Agent rotation to avoid blocks
 
-The core Wikipedia enhancement goal has been achieved - artist cards now contain rich structured biographical data.
+The project now has a complete end-to-end solution: rich biographical data extraction + user-friendly web interface.
