@@ -174,7 +174,7 @@ class WikipediaAPI:
                 'exintro': True,
                 'explaintext': True,
                 'exsectionformat': 'plain',
-                'exchars': 2500
+                'exchars': 3500
             }
 
             response = self.session.get(api_url, params=params, timeout=REQUEST_TIMEOUT)
