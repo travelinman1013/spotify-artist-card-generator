@@ -22,33 +22,23 @@ pip install -r requirements.txt
 streamlit run spotify_ui.py
 ```
 
-## Core Features
+## Core Features ✅ COMPLETE (September 18, 2025)
 
-### Streamlit Web Interface ✅ COMPLETE (September 18, 2025)
+### Streamlit Web Interface
 - **File Browser**: Modal-style archive file selection with validation
-- **Dual Modes**: Image downloader + Artist card generator tabs
+- **Triple Modes**: Image downloader + Artist card generator + Biography enhancement tabs
 - **Real-time Progress**: Live log output and progress tracking
-- **Persistent Settings**: Saves directories and recent files to JSON
-- **Session State Management**: Fixed conflicts for stable operation
+- **API Key Management**: Secure Google Gemini API key handling for AI features
 
-### Artist Card Generation ✅ COMPLETE
+### Artist Card Generation
 - **Multi-API Integration**: Spotify + Wikipedia/Wikidata + MusicBrainz
 - **Rich Metadata**: Birth/death dates, genres, albums, top tracks, biography
 - **YAML Frontmatter**: Structured data for Obsidian compatibility
 - **Image Downloads**: High-resolution artist portraits with sanitized filenames
 
-### Wikipedia/Wikidata Integration ✅ COMPLETE (September 2025)
-- **Structured Data**: Birth/death dates, places, instruments via Wikidata API
-- **Biography Text**: Wikipedia REST API for comprehensive artist biographies
-- **Fallback Strategy**: MusicBrainz when Wikipedia unavailable
-- **HTML Parsing**: BeautifulSoup4 for mobile sections infobox data
-
-### AI Biography Enhancement ✅ COMPLETE (September 18, 2025)
+### AI Biography Enhancement
 - **Intelligent Assessment**: Gemini AI evaluates if enhancement adds substantial value
-- **Comprehensive Biographies**: Multi-paragraph, well-structured artist life stories
 - **Artist Network Extraction**: Identifies mentors, collaborators, influenced artists
-- **Jazz Encyclopedia**: Builds connected network of artist relationships
-- **Smart Skipping**: Only enhances when significant new content is available
 - **Biography Accuracy Verification**: Detects and corrects artist/album/song mismatches
 - **Automatic Re-fetching**: Finds correct Wikipedia pages when mismatches detected
 
@@ -60,9 +50,6 @@ python spotify_artist_card_generator.py --artist "John Coltrane" --output-dir "/
 
 # Batch processing
 python spotify_artist_card_generator.py --input-file "daily_archive.md" --output-dir "/path/to/Artists" --images-dir "/path/to/Images"
-
-# Image downloader
-python spotify_image_downloader.py --input "/path/to/archive.md" --output "/path/to/images"
 
 # Biography enhancement (requires GOOGLE_API_KEY)
 export GOOGLE_API_KEY='your-gemini-api-key'
@@ -114,135 +101,40 @@ spotify_data:
   followers: 1000000
 albums_count: 50
 biography_source: wikipedia
----
-
-# Artist Name
-
-## Quick Info
-- **Born**: 1926-09-23
-- **Died**: 1967-07-17
-- **Genres**: jazz, bebop
-
-## Biography
-[Wikipedia biography text]
-
-## Discography
-[Albums and singles tables]
-```
-
-### Artist Images (`Artist_Name.jpg`)
-- Sanitized filenames (spaces → underscores)
-- High resolution from Spotify
-- Automatic duplicate detection
-
-## File Structure
-
-```
-image_agent_v5/
-├── spotify_image_downloader.py     # Image downloader
-├── spotify_artist_card_generator.py # Artist card generator
-├── enhance_biographies.py          # AI biography enhancer
-├── spotify_ui.py                   # Streamlit web UI
-├── requirements.txt                # Dependencies
-├── spotify_ui_config.json          # UI settings (auto-generated)
-├── artist_connections.json         # Network database (auto-generated)
-├── venv/                           # Virtual environment
-└── *.log                           # Log files
-```
-
-## Dependencies
-
-- Python 3.7+
-- Core: requests, pillow, beautifulsoup4, streamlit
-- AI Enhancement: google-generativeai, pyyaml, tqdm
-- Standard library: json, pathlib, datetime, logging
-
-## AI Biography Enhancement
-
-### Setup
-```bash
-# Get Gemini API key from https://makersuite.google.com/app/apikey
-export GOOGLE_API_KEY='your-api-key-here'
-
-# Install additional dependencies
-pip install google-generativeai pyyaml tqdm
-```
-
-### Usage
-```bash
-# Dry-run mode (preview without changes)
-python enhance_biographies.py --dry-run
-
-# Full enhancement (modifies files)
-python enhance_biographies.py
-
-# Custom directory
-python enhance_biographies.py --cards-dir "/path/to/artists"
-```
-
-### Features
-- **Intelligent Assessment**: Only enhances when substantial new content is available
-- **Artist Network**: Extracts mentors, collaborators, influenced artists
-- **Enhanced Frontmatter**: Adds `musical_connections` and `biography_enhanced_at`
-- **Progress Tracking**: Real-time progress bar with connection counts
-- **Network Database**: Maintains `artist_connections.json` for visualization
-
-### Example Output
-```yaml
----
-biography_enhanced_at: "2025-09-18T14:30:00Z"
 musical_connections:
   mentors: ["Miles Davis", "Charlie Parker"]
   collaborators: ["McCoy Tyner", "Elvin Jones"]
   influenced: ["Pharoah Sanders", "David Murray"]
   bands: ["John Coltrane Quartet"]
-network_extracted: true
 ---
 
+# Artist Name
 ## Biography
 [Comprehensive AI-enhanced biography with **bolded artist names**]
-
 ## Musical Connections
-### Mentors/Influences
 - **[[Miles Davis]]** - Provided crucial early career opportunities
-
-### Key Collaborators
 - **[[McCoy Tyner]]** - Pianist in the classic quartet
+## Discography
+[Albums and singles tables]
+```
+
+## Dependencies & Setup
+
+- Python 3.7+, requests, pillow, beautifulsoup4, streamlit, google-generativeai, pyyaml, tqdm
+
+```bash
+# Get Gemini API key from https://makersuite.google.com/app/apikey
+export GOOGLE_API_KEY='your-api-key-here'
 ```
 
 ## Current Status (September 18, 2025)
 
 ✅ **ALL MAJOR FEATURES COMPLETE + AI ENHANCEMENT + ACCURACY VERIFICATION**
 
-### Recently Added (September 18, 2025 - Latest Update)
-- **Biography Accuracy Verification**: AI-powered detection of artist/album/song mismatches
-- **Enhanced Wikipedia Search**: Improved entity type detection and disambiguation
-- **Automatic Re-fetching**: Corrects mismatched biographies by finding proper Wikipedia pages
-- **Cross-reference Validation**: Verifies Wikipedia content matches Spotify metadata
-- **Fixed "The Soul Rebels"**: Corrected album/artist confusion (was pulling Bob Marley's album)
-
-### Core Features Complete
-- **enhance_biographies.py**: Complete AI-powered biography enhancement system
-- **Artist Network Analysis**: Extracts and structures musical relationships
-- **Intelligent Content Assessment**: Gemini AI evaluates enhancement value
-- **Jazz Encyclopedia Foundation**: Connected network of artist relationships
-- **Full Testing**: Dry-run mode and real API integration verified
-
 ### Recently Fixed
+- **KeyError 'show_warning'**: Fixed inconsistent log_filters initialization between spotify_ui.py and enhanced_logging.py
+- **Biography Accuracy Verification**: AI-powered detection of artist/album/song mismatches
 - **Wikipedia Search Accuracy**: Better disambiguation between artists and albums/songs
-- **NoneType Errors**: Fixed description field handling in Wikipedia API responses
-- **Biography Mismatches**: Now detects and auto-corrects wrong entity types
 - **Streamlit File Browser**: Fixed session state conflicts and widget key issues
 
-### Known Minor Issues
-- Years active calculation needs refinement
-- Wikidata label extraction could be enhanced for birth places/instruments
-- Mobile sections API occasionally returns 403 errors
-
-### Next Priorities
-1. Integrate biography enhancement into Streamlit UI
-2. Add network visualization tools
-3. Improve Wikidata label extraction for places and instruments
-4. Add caching for API responses to reduce costs
-
-The project is feature-complete with AI-enhanced biographies, artist network analysis, and automatic accuracy verification, forming a robust foundation for a comprehensive jazz encyclopedia.
+The project is **fully feature-complete** with AI-enhanced biographies, artist network analysis, automatic accuracy verification, and a comprehensive Streamlit web interface, forming a robust foundation for a comprehensive jazz encyclopedia.
