@@ -46,6 +46,43 @@ PERPLEXITY_MODEL = "sonar-pro"
 PERPLEXITY_TEMPERATURE = 0.3
 PERPLEXITY_MAX_TOKENS = 2048
 
+# Detection Configuration (Phase 1)
+PROBLEM_CARDS_DIR = "problem-cards"
+QUARANTINE_LOG_FILE = "quarantine_log.txt"
+
+# Red flag indicators for problematic cards
+SUSPICIOUS_URL_PATTERNS = [
+    "List_of_", "list_of_",
+    "recipe", "Recipe",
+    "_blues", "_jazz", "_music",  # Genre pages
+    "cuisine", "Cuisine",
+    "food", "Food"
+]
+
+FOOD_RECIPE_TERMS = [
+    "beefsteak", "flour", "recipe", "cook", "fried", "bake", "ingredient",
+    "chicken-fried", "pan-fried", "deep-fried", "dish", "cuisine"
+]
+
+GENRE_DEFINITION_PHRASES = [
+    "refers to the local",
+    "is a genre",
+    "is a list of",
+    "is a subgenre",
+    "is a style of music",
+    "is a music genre",
+    "is a type of"
+]
+
+GENERIC_ASSOCIATED_ACTS = [
+    "beefsteak", "flour", "lists of songs", "lists of", "theme"
+]
+
+# Detection confidence thresholds
+DETECTION_CONFIDENCE_HIGH = 0.9
+DETECTION_CONFIDENCE_MEDIUM = 0.7
+DETECTION_CONFIDENCE_LOW = 0.5
+
 
 class WikipediaExtractor:
     """Handles extraction of full Wikipedia content from URLs."""
@@ -573,14 +610,261 @@ Respond in JSON:
                 "issues": []
             }
 
+    def regenerate_with_perplexity(self, artist_name: str, frontmatter: Dict[str, Any],
+                                   issues: List[str]) -> Dict[str, Any]:
+        """
+        Phase 2: Attempt to regenerate artist card using Perplexity web search.
+
+        Args:
+            artist_name: Name of the artist
+            frontmatter: Current frontmatter with Spotify data
+            issues: List of detected issues from Phase 1
+
+        Returns:
+            Dictionary with success status, new biography, connections, and metadata
+        """
+        if self.dry_run:
+            return {
+                "success": True,
+                "biography": f"[DRY RUN] Regenerated biography for {artist_name} using Perplexity web search",
+                "connections": {"mentors": [], "collaborators": [], "influenced": []},
+                "new_wikipedia_url": "https://en.wikipedia.org/wiki/Example_Artist",
+                "reason": "Dry run mode"
+            }
+
+        try:
+            # Extract Spotify metadata for enhanced query
+            top_tracks = frontmatter.get('top_tracks', [])[:3]
+            spotify_genres = frontmatter.get('genres', [])
+            spotify_followers = frontmatter.get('spotify_data', {}).get('followers', 0)
+
+            # Build context-rich query
+            query_parts = [
+                f"Who is {artist_name}?"
+            ]
+
+            if top_tracks:
+                # Extract track names (remove album info in parentheses)
+                track_names = []
+                for track in top_tracks:
+                    # Remove parenthetical album info
+                    track_name = re.sub(r'\s*\([^)]*\)', '', track)
+                    track_names.append(track_name)
+                query_parts.append(f"They have songs on Spotify including: {', '.join(track_names)}.")
+
+            if spotify_genres:
+                query_parts.append(f"Associated with genres: {', '.join(spotify_genres)}.")
+
+            query_parts.append("Provide biographical information including their real name, birth/death dates, career history, major works, collaborations, and musical style. Verify this is a real musician or band, not a recipe, list, or genre definition.")
+
+            query = " ".join(query_parts)
+
+            self.logger.info(f"Attempting Perplexity regeneration for {artist_name}")
+            self.logger.debug(f"Query: {query}")
+
+            # Use Perplexity with higher temperature for exploratory search
+            response = self.client.chat.completions.create(
+                model=PERPLEXITY_MODEL,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are an expert music researcher. Use web search to find accurate biographical information about musicians and bands. Verify that the subject is a real artist, not a recipe, list, genre, or other non-artist entity. If you cannot find credible information about this artist, explicitly state that."
+                    },
+                    {
+                        "role": "user",
+                        "content": query
+                    }
+                ],
+                temperature=0.5,  # Higher temperature for more exploratory search
+                max_tokens=PERPLEXITY_MAX_TOKENS * 2
+            )
+
+            response_text = response.choices[0].message.content.strip()
+
+            # Validate response
+            validation_result = self._validate_perplexity_response(artist_name, response_text)
+
+            if not validation_result["is_valid"]:
+                self.logger.warning(f"Perplexity response validation failed: {validation_result['reason']}")
+                return {
+                    "success": False,
+                    "reason": validation_result["reason"],
+                    "biography": "",
+                    "connections": {}
+                }
+
+            # Extract structured data from response
+            self.logger.info(f"Perplexity search successful, generating structured biography")
+
+            # Now generate a properly formatted biography
+            biography_prompt = f"""Based on your research about {artist_name}, create a comprehensive biography.
+
+RESEARCH FINDINGS:
+{response_text}
+
+FORMAT REQUIREMENTS:
+- Write 2-3 flowing biographical paragraphs with clear paragraph breaks
+- Focus on: early life, career highlights, key collaborations, musical style, and legacy
+- Follow with a "## Fun Facts" section containing 3-4 interesting trivia points
+- Then create a "## Musical Connections" section listing artist relationships
+
+CONTENT STRUCTURE:
+Paragraph 1: Early life, musical beginnings, key influences and teachers
+
+Paragraph 2: Career development, major collaborations, band memberships, significant recordings
+
+Paragraph 3: Musical style, innovations, legacy, and ongoing influence (if applicable)
+
+## Fun Facts
+- Interesting anecdote or lesser-known fact
+- Notable achievement or unusual detail
+- Personal characteristic or unique aspect
+- Historical context or cultural impact
+
+## Musical Connections
+### Mentors/Influences
+- Artist Name - Brief description of relationship
+
+### Key Collaborators
+- Artist Name - Brief description of collaboration
+
+### Artists Influenced
+- Artist Name - Brief description of influence
+
+FORMATTING RULES:
+- Use natural language without special formatting for artist names
+- Ensure clear paragraph breaks between biographical sections
+- Keep tone encyclopedic but engaging
+- Only include connections explicitly found in research"""
+
+            bio_response = self.client.chat.completions.create(
+                model=PERPLEXITY_MODEL,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are an expert music biographer. Write accurate, engaging biographies based on research findings."
+                    },
+                    {
+                        "role": "user",
+                        "content": biography_prompt
+                    }
+                ],
+                temperature=PERPLEXITY_TEMPERATURE,
+                max_tokens=PERPLEXITY_MAX_TOKENS * 2
+            )
+
+            enhanced_biography = bio_response.choices[0].message.content.strip()
+
+            # Extract connections from the formatted biography
+            connections = self._extract_connections_from_markdown(enhanced_biography)
+
+            # Try to extract Wikipedia URL from citations if available
+            new_wikipedia_url = self._extract_wikipedia_url_from_response(response_text)
+
+            self.logger.info(f"Successfully regenerated biography for {artist_name}")
+
+            return {
+                "success": True,
+                "biography": enhanced_biography,
+                "connections": connections,
+                "new_wikipedia_url": new_wikipedia_url,
+                "reason": "Perplexity regeneration successful"
+            }
+
+        except Exception as e:
+            self.logger.error(f"Error in Perplexity regeneration: {e}")
+            return {
+                "success": False,
+                "reason": f"Regeneration failed: {str(e)}",
+                "biography": "",
+                "connections": {}
+            }
+
+    def _validate_perplexity_response(self, artist_name: str, response_text: str) -> Dict[str, Any]:
+        """
+        Validate that Perplexity response contains credible artist information.
+
+        Args:
+            artist_name: Name of the artist
+            response_text: Response from Perplexity
+
+        Returns:
+            Dictionary with validation result
+        """
+        response_lower = response_text.lower()
+
+        # Check for explicit failure indicators
+        failure_phrases = [
+            "no credible information",
+            "cannot find information",
+            "appears to be misidentified",
+            "not a real artist",
+            "not a musician",
+            "not a band",
+            "is a recipe",
+            "is a list",
+            "is a genre"
+        ]
+
+        for phrase in failure_phrases:
+            if phrase in response_lower:
+                return {
+                    "is_valid": False,
+                    "reason": f"Response indicates no credible artist info: '{phrase}'"
+                }
+
+        # Check that response is substantial
+        if len(response_text) < 200:
+            return {
+                "is_valid": False,
+                "reason": "Response too short to be credible biography"
+            }
+
+        # Check for musical context
+        musical_terms = ["music", "musician", "band", "artist", "song", "album", "record", "perform"]
+        has_musical_context = any(term in response_lower for term in musical_terms)
+
+        if not has_musical_context:
+            return {
+                "is_valid": False,
+                "reason": "Response lacks musical context"
+            }
+
+        return {
+            "is_valid": True,
+            "reason": "Response appears credible"
+        }
+
+    def _extract_wikipedia_url_from_response(self, response_text: str) -> Optional[str]:
+        """
+        Extract Wikipedia URL from Perplexity response citations if present.
+
+        Args:
+            response_text: Response from Perplexity
+
+        Returns:
+            Wikipedia URL if found, None otherwise
+        """
+        # Look for Wikipedia URLs in the response
+        import re
+        wiki_pattern = r'https?://en\.wikipedia\.org/wiki/[^\s\)\]\"<>]+'
+        matches = re.findall(wiki_pattern, response_text)
+
+        if matches:
+            # Return the first Wikipedia URL found
+            return matches[0]
+
+        return None
+
 
 class ArtistCardProcessor:
     """Main processor for enhancing artist cards and managing connections."""
 
-    def __init__(self, cards_dir: str, dry_run: bool = False, force: bool = False):
+    def __init__(self, cards_dir: str, dry_run: bool = False, force: bool = False, skip_detection: bool = False):
         self.cards_dir = Path(cards_dir)
         self.dry_run = dry_run
         self.force = force
+        self.skip_detection = skip_detection
         self.logger = logging.getLogger(__name__)
 
         # Initialize components
@@ -601,7 +885,10 @@ class ArtistCardProcessor:
             'skipped_already_enhanced': 0,
             'skipped_no_wikipedia': 0,
             'errors': 0,
-            'connections_found': 0
+            'connections_found': 0,
+            'problems_detected': 0,
+            'recovered': 0,
+            'quarantined': 0
         }
 
     def _load_connections(self) -> Dict[str, Any]:
@@ -679,6 +966,194 @@ class ArtistCardProcessor:
             self.logger.error(f"Error in alternative Wikipedia fetch: {e}")
 
         return None
+
+    def detect_problematic_card(self, frontmatter: Dict[str, Any], content: str) -> Tuple[bool, float, List[str]]:
+        """
+        Phase 1: Detect if card has problematic Wikipedia match before enhancement.
+
+        Args:
+            frontmatter: Parsed frontmatter from card
+            content: Full card content
+
+        Returns:
+            Tuple of (is_problematic, confidence_score, list_of_issues)
+        """
+        issues = []
+        confidence_score = 0.0
+        confidence_points = 0
+
+        # Get key data
+        wikipedia_url = frontmatter.get('external_urls', {}).get('wikipedia', '')
+        associated_acts = frontmatter.get('associated_acts', [])
+        title = frontmatter.get('title', '')
+        biography = self.extract_current_biography(content)
+        artist_name = Path(title).stem.replace('_', ' ')
+
+        # Check 1: Suspicious Wikipedia URL patterns
+        url_suspicious = False
+        for pattern in SUSPICIOUS_URL_PATTERNS:
+            if pattern in wikipedia_url:
+                issues.append(f"Suspicious URL pattern: {pattern} in {wikipedia_url}")
+                confidence_points += 25
+                url_suspicious = True
+                break
+
+        # Check 2: Biography contains food/recipe terms when artist name suggests music
+        food_terms_found = []
+        biography_lower = biography.lower()
+        for term in FOOD_RECIPE_TERMS:
+            if term.lower() in biography_lower:
+                food_terms_found.append(term)
+
+        if food_terms_found and not url_suspicious:
+            # Only flag if multiple food terms and URL doesn't already look suspicious
+            if len(food_terms_found) >= 2:
+                issues.append(f"Biography contains food/recipe terms: {', '.join(food_terms_found[:3])}")
+                confidence_points += 20
+        elif food_terms_found and url_suspicious:
+            # Very strong signal if both URL and content have food terms
+            issues.append(f"Biography contains food/recipe terms matching suspicious URL: {', '.join(food_terms_found[:3])}")
+            confidence_points += 30
+
+        # Check 3: Biography starts with genre definition phrases
+        for phrase in GENRE_DEFINITION_PHRASES:
+            if biography.lower().startswith(phrase) or f" {phrase} " in biography_lower[:200]:
+                issues.append(f"Biography appears to define a genre: '{phrase}' in opening")
+                confidence_points += 30
+                break
+
+        # Check 4: Generic/non-musical associated acts
+        generic_acts_found = []
+        for act in associated_acts:
+            if isinstance(act, str):
+                for generic_term in GENERIC_ASSOCIATED_ACTS:
+                    if generic_term.lower() in act.lower():
+                        generic_acts_found.append(act)
+                        break
+
+        if generic_acts_found:
+            issues.append(f"Generic associated acts found: {', '.join(generic_acts_found)}")
+            confidence_points += 20
+
+        # Check 5: Biography explicitly states it can't describe the artist
+        cant_describe_phrases = [
+            "impossible to create a biography",
+            "does not contain information about",
+            "focuses on the history of",
+            "is not about",
+            "no information about any artists"
+        ]
+        for phrase in cant_describe_phrases:
+            if phrase.lower() in biography_lower:
+                issues.append(f"Biography explicitly states mismatch: '{phrase}'")
+                confidence_points += 40
+                break
+
+        # Check 6: Title mismatch (filename vs frontmatter title)
+        filename_artist = Path(content).stem if '/' in content else artist_name
+        if title and filename_artist:
+            # Normalize for comparison
+            title_norm = title.lower().replace(' ', '').replace('_', '')
+            filename_norm = filename_artist.lower().replace(' ', '').replace('_', '')
+
+            if title_norm != filename_norm:
+                # Check if it's a significant difference (not just case/punctuation)
+                if len(set(title_norm) - set(filename_norm)) > 2:
+                    issues.append(f"Title mismatch: frontmatter '{title}' vs filename '{filename_artist}'")
+                    confidence_points += 15
+
+        # Calculate confidence score (0-1 scale)
+        confidence_score = min(confidence_points / 100.0, 1.0)
+
+        is_problematic = confidence_score >= DETECTION_CONFIDENCE_MEDIUM
+
+        if is_problematic:
+            self.logger.info(f"Detected problematic card with {confidence_score:.2f} confidence: {len(issues)} issues")
+        else:
+            self.logger.debug(f"Card appears normal (confidence: {confidence_score:.2f})")
+
+        return is_problematic, confidence_score, issues
+
+    def quarantine_card(self, file_path: Path, frontmatter: Dict[str, Any],
+                       issues: List[str], reason: str) -> bool:
+        """
+        Phase 3: Move problematic card to quarantine directory with metadata.
+
+        Args:
+            file_path: Path to the problematic card file
+            frontmatter: Current frontmatter
+            issues: List of detected issues
+            reason: Reason for quarantine
+
+        Returns:
+            True if quarantine successful, False otherwise
+        """
+        try:
+            # Create problem-cards directory if it doesn't exist
+            problem_cards_dir = self.cards_dir / PROBLEM_CARDS_DIR
+            problem_cards_dir.mkdir(exist_ok=True)
+
+            # Update frontmatter with quarantine metadata
+            frontmatter['data_quality'] = 'problematic'
+            frontmatter['quarantine_reason'] = reason
+            frontmatter['original_detection_issues'] = issues
+            frontmatter['quarantine_date'] = datetime.now().isoformat()
+            frontmatter['original_location'] = str(file_path)
+
+            # Read current file content
+            with open(file_path, 'r', encoding='utf-8') as f:
+                current_content = f.read()
+
+            # Extract content after frontmatter
+            if current_content.startswith('---'):
+                frontmatter_end = current_content.find('---', 3)
+                if frontmatter_end != -1:
+                    content_text = current_content[frontmatter_end + 3:].strip()
+                else:
+                    content_text = current_content
+            else:
+                content_text = current_content
+
+            # Reconstruct file with updated frontmatter
+            frontmatter_text = yaml.dump(frontmatter, default_flow_style=False, allow_unicode=True)
+            full_content = f"---\n{frontmatter_text}---\n\n{content_text}"
+
+            # Determine destination path
+            destination_path = problem_cards_dir / file_path.name
+
+            if self.dry_run:
+                self.logger.info(f"[DRY RUN] Would quarantine {file_path.name} to {destination_path}")
+                self.logger.info(f"[DRY RUN] Reason: {reason}")
+                self.logger.info(f"[DRY RUN] Issues: {issues}")
+                return True
+
+            # Write to quarantine location
+            destination_path.write_text(full_content, encoding='utf-8')
+
+            # Remove from original location
+            file_path.unlink()
+
+            # Log to quarantine log file
+            log_file = self.cards_dir / QUARANTINE_LOG_FILE
+            log_entry = {
+                "timestamp": datetime.now().isoformat(),
+                "filename": file_path.name,
+                "artist_name": frontmatter.get('title', file_path.stem.replace('_', ' ')),
+                "reason": reason,
+                "issues": issues,
+                "moved_to": str(destination_path)
+            }
+
+            # Append to log file
+            with open(log_file, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(log_entry, ensure_ascii=False) + '\n')
+
+            self.logger.warning(f"⚠️ Quarantined {file_path.name}: {reason}")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Error quarantining {file_path}: {e}")
+            return False
 
     def _save_connections(self) -> None:
         """Save connections database to file."""
@@ -855,7 +1330,7 @@ class ArtistCardProcessor:
 
     def process_single_file(self, file_path: Path) -> str:
         """
-        Process a single artist card file.
+        Process a single artist card file with three-phase detection system.
 
         Args:
             file_path: Path to artist card file
@@ -880,7 +1355,72 @@ class ArtistCardProcessor:
                     self.stats['skipped_no_wikipedia'] += 1
                     return "⚠️ No Wikipedia URL"
 
-            # Extract Wikipedia URL and current biography
+            # === PHASE 1: DETECTION (Pre-Enhancement) ===
+            if not self.skip_detection:
+                is_problematic, confidence, issues = self.detect_problematic_card(frontmatter, content)
+
+                if is_problematic and confidence >= DETECTION_CONFIDENCE_MEDIUM:
+                    self.stats['problems_detected'] += 1
+                    self.logger.info(f"🔍 Detected problematic card: {artist_name} (confidence: {confidence:.2f})")
+                    self.logger.debug(f"Issues: {issues}")
+
+                    # === PHASE 2: RECOVERY ATTEMPT ===
+                    self.logger.info(f"🔄 Attempting Perplexity recovery for {artist_name}")
+                    recovery_result = self.perplexity_analyzer.regenerate_with_perplexity(
+                        artist_name, frontmatter, issues
+                    )
+
+                    # Rate limiting
+                    time.sleep(RATE_LIMIT_DELAY)
+
+                    if recovery_result.get('success'):
+                        # Recovery successful - update card with new data
+                        self.logger.info(f"✅ Recovery successful for {artist_name}")
+
+                        enhanced_bio = recovery_result.get('biography', '')
+                        connections = recovery_result.get('connections', {})
+                        new_wikipedia_url = recovery_result.get('new_wikipedia_url')
+
+                        # Update frontmatter with recovery metadata
+                        frontmatter['data_quality'] = 'validated'
+                        frontmatter['recovery_attempted_at'] = datetime.now().isoformat()
+                        frontmatter['original_wikipedia_url'] = frontmatter.get('external_urls', {}).get('wikipedia')
+                        if new_wikipedia_url:
+                            if 'external_urls' not in frontmatter:
+                                frontmatter['external_urls'] = {}
+                            frontmatter['external_urls']['wikipedia'] = new_wikipedia_url
+
+                        # Update card
+                        if self.update_artist_card(file_path, frontmatter, content, enhanced_bio, connections):
+                            # Update connections database
+                            if connections:
+                                self.connections_db[artist_name] = {
+                                    **connections,
+                                    'updated': datetime.now().isoformat()
+                                }
+                                self.stats['connections_found'] += sum(
+                                    len(v) if isinstance(v, list) else 0 for v in connections.values()
+                                )
+
+                            self.stats['recovered'] += 1
+                            connection_count = sum(len(v) if isinstance(v, list) else 0 for v in connections.values())
+                            return f"✅ Recovered ({connection_count} connections)"
+                        else:
+                            self.stats['errors'] += 1
+                            return "❌ Recovery update failed"
+
+                    else:
+                        # === PHASE 3: QUARANTINE ===
+                        self.logger.warning(f"⚠️ Recovery failed for {artist_name}: {recovery_result.get('reason')}")
+
+                        if self.quarantine_card(file_path, frontmatter, issues, recovery_result.get('reason', 'Unknown')):
+                            self.stats['quarantined'] += 1
+                            return f"⚠️ Quarantined: {recovery_result.get('reason', 'No credible info')}"
+                        else:
+                            self.stats['errors'] += 1
+                            return "❌ Quarantine failed"
+
+            # === STANDARD ENHANCEMENT FLOW (for non-problematic cards) ===
             wikipedia_url = frontmatter.get('external_urls', {}).get('wikipedia')
             current_bio = self.extract_current_biography(content)
 
@@ -1009,6 +1549,9 @@ class ArtistCardProcessor:
         """Print processing summary statistics."""
         print(f"\n📊 Processing Summary:")
         print(f"✅ Enhanced: {self.stats['enhanced']} artists")
+        print(f"🔍 Problems detected: {self.stats['problems_detected']}")
+        print(f"✅ Recovered: {self.stats['recovered']} artists")
+        print(f"⚠️ Quarantined: {self.stats['quarantined']} artists")
         print(f"🔗 Connections found: {self.stats['connections_found']}")
         print(f"📚 Network nodes: {len(self.connections_db)} artists")
         print(f"⏭️ Skipped (minimal content): {self.stats['skipped_content']}")
@@ -1017,8 +1560,12 @@ class ArtistCardProcessor:
         print(f"❌ Errors: {self.stats['errors']}")
         print(f"📁 Total processed: {self.stats['processed']}")
 
-        if self.stats['enhanced'] > 0:
-            print(f"\n🎯 Success rate: {(self.stats['enhanced'] / self.stats['processed'] * 100):.1f}%")
+        if self.stats['enhanced'] > 0 or self.stats['recovered'] > 0:
+            total_success = self.stats['enhanced'] + self.stats['recovered']
+            print(f"\n🎯 Success rate: {(total_success / self.stats['processed'] * 100):.1f}%")
+
+        if self.stats['quarantined'] > 0:
+            print(f"\n⚠️ Note: {self.stats['quarantined']} problematic cards moved to {PROBLEM_CARDS_DIR}/")
 
 
 def setup_logging(log_level: str) -> None:
@@ -1068,6 +1615,11 @@ def main():
         action='store_true',
         help='Display network statistics after processing'
     )
+    parser.add_argument(
+        '--skip-detection',
+        action='store_true',
+        help='Skip Phase 1 detection and proceed with standard enhancement for all cards'
+    )
 
     args = parser.parse_args()
 
@@ -1085,7 +1637,7 @@ def main():
             sys.exit(1)
 
         # Process files
-        processor = ArtistCardProcessor(args.cards_dir, args.dry_run, args.force)
+        processor = ArtistCardProcessor(args.cards_dir, args.dry_run, args.force, args.skip_detection)
         processor.process_all_files()
 
         # Show network statistics if requested
