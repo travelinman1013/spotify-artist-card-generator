@@ -17,7 +17,15 @@ A comprehensive Python toolkit for building a personal artist knowledge base usi
 - **Obsidian Integration**: YAML frontmatter compatible with Obsidian databases
 - **Structured Output**: Cross-linked markdown files for your knowledge vault
 
-### 🌐 Web Interface (NEW!)
+### 🤖 AI Biography Enhancement (NEW!)
+- **Dual AI Providers**: Choose between Google Gemini or Perplexity AI
+- **Perplexity Integration**: Real-time web search for comprehensive research
+- **Artist Network Extraction**: Automatically identifies mentors, collaborators, and influences
+- **Source Verification**: Built-in citation tracking ensures accuracy
+- **Batch Processing**: Enhance entire artist collections efficiently
+- **Smart Updates**: Only enhances when substantial new content is available
+
+### 🌐 Web Interface
 - **User-Friendly UI**: Streamlit-based web interface for all operations
 - **File Browser**: Automatically discovers archive files in your vault
 - **Real-Time Progress**: Live progress bars and log output
@@ -75,6 +83,17 @@ python spotify_artist_card_generator.py \
   --input-file "/path/to/daily_archive.md" \
   --output-dir "/path/to/artist_cards/" \
   --images-dir "/path/to/images/"
+
+# Enhance biographies with Perplexity AI (recommended)
+export PERPLEXITY_API_KEY='your-api-key'
+python enhance_biographies_perplexity.py \
+  --cards-dir "/path/to/artist_cards/" \
+  --log-level INFO
+
+# Or use Google Gemini
+export GOOGLE_API_KEY='your-api-key'
+python enhance_biographies.py \
+  --cards-dir "/path/to/artist_cards/"
 ```
 
 ## 📊 Output Examples
@@ -142,6 +161,20 @@ Expected input format for daily archive files:
 ### Spotify API
 The scripts use pre-configured Spotify credentials for read-only access. No setup required.
 
+### AI Enhancement APIs
+For biography enhancement, choose one provider:
+
+**Perplexity AI (Recommended)**
+- Get API key: https://www.perplexity.ai/settings/api
+- Set environment variable: `export PERPLEXITY_API_KEY='your-key'`
+- Better research quality with real-time web search
+- Native citation tracking and source verification
+
+**Google Gemini (Alternative)**
+- Get API key: https://makersuite.google.com/app/apikey
+- Set environment variable: `export GOOGLE_API_KEY='your-key'`
+- Original implementation, solid performance
+
 ### Default Paths
 The web UI is pre-configured for this Obsidian vault structure:
 - **Artist Cards**: `/Users/maxwell/LETSGO/MaxVault/01_Projects/PersonalArtistWiki/Artists`
@@ -175,6 +208,13 @@ Paths can be customized in the Settings tab.
    - Real-time progress tracking and log display
    - Persistent configuration management
 
+4. **AI Biography Enhancer**: Enriches artist biographies with AI research
+   - **Perplexity Version** (`enhance_biographies_perplexity.py`): Real-time web search and citation tracking
+   - **Gemini Version** (`enhance_biographies.py`): Google Gemini-powered enhancement
+   - Extracts artist relationships (mentors, collaborators, influences)
+   - Source verification ensures accuracy
+   - Builds artist connection network for encyclopedia
+
 ### Data Sources
 
 - **Spotify API**: Discography, popularity, genres, related artists
@@ -187,20 +227,25 @@ Paths can be customized in the Settings tab.
 - **Wikipedia REST API**: Page summaries and mobile sections
 - **Wikidata API**: Structured claims and entity data
 - **Wikipedia Action API**: Entity ID lookup for Wikidata integration
+- **Perplexity AI API**: Real-time web search for biography enhancement (recommended)
+- **Google Gemini API**: AI-powered biography enrichment (alternative)
 
 ## 📁 Project Structure
 
 ```
 image_agent_v5/
-├── spotify_image_downloader.py     # Image download functionality
-├── spotify_artist_card_generator.py # Artist card generation
-├── spotify_ui.py                   # Web interface (NEW!)
-├── requirements.txt                # Python dependencies
-├── spotify_ui_config.json          # UI settings (auto-generated)
-├── CLAUDE.md                       # Developer documentation
-├── README.md                       # This file
-├── venv/                           # Python virtual environment
-└── *.log                           # Log files (gitignored)
+├── spotify_image_downloader.py          # Image download functionality
+├── spotify_artist_card_generator.py     # Artist card generation
+├── enhance_biographies_perplexity.py    # AI biography enhancement (Perplexity)
+├── enhance_biographies.py               # AI biography enhancement (Gemini)
+├── spotify_ui.py                        # Web interface
+├── requirements.txt                     # Python dependencies
+├── spotify_ui_config.json               # UI settings (auto-generated)
+├── artist_connections.json              # Artist network graph (auto-generated)
+├── CLAUDE.md                            # Developer documentation
+├── README.md                            # This file
+├── venv/                                # Python virtual environment
+└── *.log                                # Log files (gitignored)
 ```
 
 ## 🔍 Logging & Debugging
@@ -275,5 +320,5 @@ This project is for personal use. Spotify API usage follows their developer term
 
 ---
 
-*Last updated: September 18, 2025*
-*Version: 1.0 - Full web interface with session state fixes*
+*Last updated: September 30, 2025*
+*Version: 1.1 - Added Perplexity AI biography enhancement with real-time web search*

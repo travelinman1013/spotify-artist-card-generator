@@ -4,245 +4,263 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Python scripts for generating comprehensive Spotify artist cards for an Obsidian vault:
+Spotify Artist Tools is a Python-based system for building a personal artist knowledge base integrated with Obsidian. It combines data from Spotify API, Wikipedia, and Wikidata to create comprehensive artist profiles with images, biographies, and structured metadata.
 
-1. **spotify_image_downloader.py**: Downloads Spotify artist cover images from daily archive markdown files
-2. **spotify_artist_card_generator.py**: Generates artist cards combining Spotify, Wikipedia, and MusicBrainz data
-3. **enhance_biographies.py**: AI-powered post-processor that enhances artist biographies with comprehensive content and artist network analysis
-4. **spotify_ui.py**: Streamlit web interface for running the core scripts
+## Core Architecture
 
-## Quick Start
+### Three-Tier System
+
+1. **Image Downloader** (`spotify_image_downloader.py`)
+   - Parses markdown table archives to extract artist names
+   - Downloads highest-resolution artist images from Spotify
+   - Handles duplicate detection and sanitized filename generation
+   - Uses rate limiting (0.6s delay) to respect Spotify API limits
+
+2. **Artist Card Generator** (`spotify_artist_card_generator.py`)
+   - Multi-API data aggregation from Spotify, Wikipedia, and Wikidata
+   - Creates Obsidian-compatible markdown files with YAML frontmatter
+   - Handles complex data extraction from Wikipedia infoboxes and Wikidata entities
+   - Fallback hierarchy: Wikipedia → Wikidata → MusicBrainz
+   - Special handling for `years_active` field: prefers Wikipedia wikitext parsing over Wikidata estimates
+
+3. **Biography Enhancement** (`enhance_biographies.py` / `enhance_biographies_perplexity.py`)
+   - AI-powered biography enrichment using Google Gemini or Perplexity AI
+   - **Gemini Version**: Original implementation using Google Gemini API
+   - **Perplexity Version** (NEW): Enhanced research using Perplexity's web search capabilities
+   - Extracts artist connections and relationships from Wikipedia content
+   - Builds network graph of related artists for encyclopedia purposes
+   - Requires `GOOGLE_API_KEY` (Gemini) or `PERPLEXITY_API_KEY` (Perplexity) environment variable
+
+### Web Interface (`spotify_ui.py`)
+
+Streamlit-based UI with three main tabs:
+- **Image Downloader**: File upload with batch processing
+- **Artist Card Generator**: Single artist or batch mode
+- **Biography Enhancement**: AI-powered biography expansion with network analysis
+- **Settings**: Configuration persistence via `spotify_ui_config.json`
+
+Session state management for uploaded files uses temporary file handling with cleanup on session end.
+
+## Common Commands
+
+### Setup and Installation
+```bash
+# Create and activate virtual environment
+python3 -m venv venv
+source venv/bin/activate  # On macOS/Linux
+
+# Install dependencies
+pip install -r requirements.txt
+```
+
+### Running the Application
 
 ```bash
-# Setup environment
-python3 -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
-
-# Launch web UI
+# Start the web UI (primary interface)
 streamlit run spotify_ui.py
 ```
 
-## Core Features
-
-### Streamlit Web Interface ✅ COMPLETE (September 18, 2025)
-- **File Browser**: Modal-style archive file selection with validation
-- **Dual Modes**: Image downloader + Artist card generator tabs
-- **Real-time Progress**: Live log output and progress tracking
-- **Persistent Settings**: Saves directories and recent files to JSON
-- **Session State Management**: Fixed conflicts for stable operation
-
-### Artist Card Generation ✅ COMPLETE
-- **Multi-API Integration**: Spotify + Wikipedia/Wikidata + MusicBrainz
-- **Rich Metadata**: Birth/death dates, genres, albums, top tracks, biography
-- **YAML Frontmatter**: Structured data for Obsidian compatibility
-- **Image Downloads**: High-resolution artist portraits with sanitized filenames
-
-### Wikipedia/Wikidata Integration ✅ COMPLETE (September 2025)
-- **Structured Data**: Birth/death dates, places, instruments via Wikidata API
-- **Biography Text**: Wikipedia REST API for comprehensive artist biographies
-- **Fallback Strategy**: MusicBrainz when Wikipedia unavailable
-- **HTML Parsing**: BeautifulSoup4 for mobile sections infobox data
-
-### AI Biography Enhancement ✅ COMPLETE (September 18, 2025)
-- **Intelligent Assessment**: Gemini AI evaluates if enhancement adds substantial value
-- **Comprehensive Biographies**: Multi-paragraph, well-structured artist life stories
-- **Artist Network Extraction**: Identifies mentors, collaborators, influenced artists
-- **Jazz Encyclopedia**: Builds connected network of artist relationships
-- **Smart Skipping**: Only enhances when significant new content is available
-- **Biography Accuracy Verification**: Detects and corrects artist/album/song mismatches
-- **Automatic Re-fetching**: Finds correct Wikipedia pages when mismatches detected
-
-## Command Line Usage
+### Command-Line Tools
 
 ```bash
-# Single artist mode
-python spotify_artist_card_generator.py --artist "John Coltrane" --output-dir "/path/to/Artists"
+# Download artist images from archive file
+python spotify_image_downloader.py \
+  --input "/path/to/daily_archive.md" \
+  --output "/path/to/images/" \
+  --skip-existing
 
-# Batch processing
-python spotify_artist_card_generator.py --input-file "daily_archive.md" --output-dir "/path/to/Artists" --images-dir "/path/to/Images"
+# Generate single artist card
+python spotify_artist_card_generator.py \
+  --artist "Artist Name" \
+  --output-dir "/path/to/cards/" \
+  --images-dir "/path/to/images/"
 
-# Image downloader
-python spotify_image_downloader.py --input "/path/to/archive.md" --output "/path/to/images"
+# Batch generate from archive file
+python spotify_artist_card_generator.py \
+  --input-file "/path/to/daily_archive.md" \
+  --output-dir "/path/to/cards/" \
+  --images-dir "/path/to/images/" \
+  --log-level INFO
 
-# Biography enhancement (requires GOOGLE_API_KEY)
-export GOOGLE_API_KEY='your-gemini-api-key'
-python enhance_biographies.py --dry-run  # Preview mode
-python enhance_biographies.py            # Full enhancement
+# Enhance biographies with AI (Gemini)
+export GOOGLE_API_KEY="your-api-key"
+python enhance_biographies.py \
+  --cards-dir "/path/to/cards/" \
+  --dry-run  # Preview changes without modifying files
+  --force    # Re-enhance already processed files
+
+# Enhance biographies with AI (Perplexity - recommended)
+export PERPLEXITY_API_KEY="your-api-key"
+python enhance_biographies_perplexity.py \
+  --cards-dir "/path/to/cards/" \
+  --dry-run  # Preview changes without modifying files
+  --force    # Re-enhance already processed files
 ```
 
-## Configuration
+## Data Flow and API Integration
 
-### Spotify API Credentials (Hardcoded)
-- Client ID: `a088edf333334899b6ad55579b834389`
-- Client Secret: `78b5d889d9094ff0bb0b2a22cc8cfaac`
-- Redirect URI: `http://127.0.0.1:8888/callback`
+### Archive File Format
 
-### Default Paths
-- Artist Cards: `/Users/maxwell/LETSGO/MaxVault/01_Projects/PersonalArtistWiki/Artists`
-- Artist Images: `/Users/maxwell/LETSGO/MaxVault/03_Resources/source_material/ArtistPortraits`
-- Archive Search: `/Users/maxwell/LETSGO/MaxVault`
-
-### API Keys & Rate Limiting
-- **Spotify**: Hardcoded credentials, 100 requests/minute (0.6s delay)
-- **Wikipedia**: 1 second delay between requests
-- **MusicBrainz**: 1 second delay (required by API)
-- **Gemini AI**: Requires GOOGLE_API_KEY environment variable, 2 second delays
-
-## Input Format
-
-Expects Obsidian daily archive markdown files with pipe-separated tables:
-- Column 2: Artist name
-- Column 8: Status ("✅ Found" indicates Spotify match)
-
-Example:
-```
-| 06:07 | John Coltrane | Welcome | Album | jazz, bebop | Show | DJ | ✅ Found | 100.0% | [Link] |
+Input files are markdown tables with this structure:
+```markdown
+| Time  | Artist | Song | Album | Genres | Show | Location | Status    | Match | Link |
+| 06:07 | Name   | Song | Album | jazz   | Show | Studio   | ✅ Found | 100%  | URL  |
 ```
 
-## Output Format
+Only rows with `Status = "✅ Found"` are processed.
 
-### Artist Cards (`Artist_Name.md`)
-```yaml
----
-title: Artist Name
-birth_date: "1926-09-23"
-death_date: "1967-07-17"
-genres: ["jazz", "bebop"]
-spotify_data:
-  id: spotify_id
-  popularity: 66
-  followers: 1000000
-albums_count: 50
-biography_source: wikipedia
----
+### Spotify API Authentication
 
-# Artist Name
+Uses Client Credentials flow with hardcoded credentials (read-only access). Token auto-refresh implemented with 60-second buffer before expiration.
 
-## Quick Info
-- **Born**: 1926-09-23
-- **Died**: 1967-07-17
-- **Genres**: jazz, bebop
+### Wikipedia Data Extraction Strategy
 
-## Biography
-[Wikipedia biography text]
+1. **Search**: REST API with multiple search strategies (artist name, "artist band", "artist musician")
+2. **Summary**: Get basic biography via `/page/summary/` endpoint
+3. **Structured Data**:
+   - Primary: Mobile sections API (`/page/mobile-sections/`)
+   - Fallback: Action API wikitext parsing when mobile API returns 403
+   - Wikitext parsing handles `years_active`, `birth_date`, `death_date`, `instruments` fields
+4. **Wikidata**: Entity lookup via Wikipedia pageprops, then structured claims extraction
 
-## Discography
-[Albums and singles tables]
-```
+### Wikidata Properties Used
 
-### Artist Images (`Artist_Name.jpg`)
-- Sanitized filenames (spaces → underscores)
-- High resolution from Spotify
-- Automatic duplicate detection
+- P569: Date of birth
+- P570: Date of death
+- P19: Place of birth
+- P1303: Instruments played
+- P1477: Birth name
+- P742: Pseudonym (also known as)
+- P1449: Nickname
+- P106: Occupation
+- P264: Record label
+- P26: Spouse
+- P2032/P2034: Work period start/end
 
-## File Structure
+### Perplexity API Integration (NEW)
 
-```
-image_agent_v5/
-├── spotify_image_downloader.py     # Image downloader
-├── spotify_artist_card_generator.py # Artist card generator
-├── enhance_biographies.py          # AI biography enhancer
-├── spotify_ui.py                   # Streamlit web UI
-├── requirements.txt                # Dependencies
-├── spotify_ui_config.json          # UI settings (auto-generated)
-├── artist_connections.json         # Network database (auto-generated)
-├── venv/                           # Virtual environment
-└── *.log                           # Log files
-```
+The `enhance_biographies_perplexity.py` script uses Perplexity AI for improved biography enhancement:
 
-## Dependencies
+**Key Features:**
+- Real-time web search for up-to-date artist information beyond Wikipedia
+- Native citation support for better source verification
+- Structured JSON output mode for cleaner artist connection extraction
+- OpenAI-compatible API using the `openai` Python client
 
-- Python 3.7+
-- Core: requests, pillow, beautifulsoup4, streamlit
-- AI Enhancement: google-generativeai, pyyaml, tqdm
-- Standard library: json, pathlib, datetime, logging
+**Configuration:**
+- API Base URL: `https://api.perplexity.ai`
+- Model: `sonar-pro` (recommended for high-quality research)
+- Temperature: 0.3 (balanced creativity and accuracy)
+- Max Tokens: 2048 (standard), 4096 (biography generation)
 
-## AI Biography Enhancement
+**Advantages over Gemini:**
+- Better at finding and verifying artist connections from multiple sources
+- Real-time web search can discover recent information not in Wikipedia
+- More accurate at extracting structured relationship data
+- Built-in citation tracking improves source verification
 
-### Setup
+**Setup:**
+1. Get API key from https://www.perplexity.ai/settings/api
+2. Set environment variable: `export PERPLEXITY_API_KEY='your-key'`
+3. Run with same CLI interface as Gemini version
+
+**Frontmatter Tracking:**
+Enhanced files include `enhancement_provider: 'perplexity'` to distinguish from Gemini-enhanced biographies.
+
+## File Structure and Naming
+
+### Generated Files
+
+**Artist Cards**: `{Artist_Name}.md` in output directory
+- Spaces → underscores
+- Special characters removed
+- Ampersands → "and"
+- Max 200 characters
+
+**Artist Images**: `{Artist_Name}.jpg` in images directory
+- Same sanitization rules
+- Extensions: .jpg (default), .png, .webp
+
+**Configuration**: `spotify_ui_config.json` (auto-generated)
+- Stores default directories
+- Maintains recent files list (max 10)
+- Session-specific settings for web UI
+
+### Obsidian Integration
+
+Generated markdown files include:
+- YAML frontmatter with structured metadata
+- Wikilinks to related artists: `[[Artist Name]]`
+- Relative image paths: `![]({filename})`
+- External links to Spotify, Wikipedia, MusicBrainz
+
+## Important Implementation Details
+
+### Years Active Field Priority
+
+The `years_active` field uses Wikipedia wikitext parsing over Wikidata estimates because:
+1. Wikipedia often has manually curated ranges (e.g., "1945-1967")
+2. Wikidata may only have start year, requiring estimation
+3. Code at `spotify_artist_card_generator.py:1034-1039` preserves Wikipedia data when it contains a range
+
+### Rate Limiting
+
+- **Spotify**: 100 req/min (0.6s delay)
+- **Wikipedia**: 1s delay between requests
+- **Wikidata**: 1s delay (required by ToS)
+- **MusicBrainz**: 1s delay (strictly enforced)
+
+### Error Handling Patterns
+
+- Spotify 401 responses trigger automatic re-authentication
+- Wikipedia mobile API 403 errors fallback to Action API
+- Empty biographies trigger MusicBrainz fallback
+- Wikidata label extraction requires separate API calls per entity
+
+### Session State Management (Streamlit)
+
+Key session state variables:
+- `running`: Process execution flag
+- `log_output`: Real-time command output buffer
+- `uploaded_file_{downloader|generator}`: Uploaded file references
+- `temp_file_path_{downloader|generator}`: Temporary file paths requiring cleanup
+
+## Development Notes
+
+### Adding New Data Fields
+
+1. Extract data in `WikipediaAPI.get_artist_structured_data()`
+2. Update `build_artist_card()` to include in frontmatter
+3. Add to markdown content in Quick Info section
+4. Update `_parse_wikitext_infobox()` or `get_wikidata_claims()` for source
+
+### Debugging Wikipedia Extraction
+
+Enable DEBUG logging to see:
+- Search queries and results
+- Mobile sections vs Action API fallback decisions
+- Wikitext parsing results
+- Wikidata entity lookups
+
+### Testing Individual Artists
+
+Use single artist mode to test data extraction without batch overhead:
 ```bash
-# Get Gemini API key from https://makersuite.google.com/app/apikey
-export GOOGLE_API_KEY='your-api-key-here'
-
-# Install additional dependencies
-pip install google-generativeai pyyaml tqdm
+python spotify_artist_card_generator.py \
+  --artist "John Coltrane" \
+  --output-dir "./test_output" \
+  --log-level DEBUG
 ```
 
-### Usage
-```bash
-# Dry-run mode (preview without changes)
-python enhance_biographies.py --dry-run
+## Known Issues
 
-# Full enhancement (modifies files)
-python enhance_biographies.py
+- Years active calculation occasionally shows incorrect start dates when using Wikidata estimation
+- Wikidata label extraction requires additional API calls (rate limiting concern)
+- Wikipedia mobile sections API intermittently returns 403 (fallback to Action API mitigates)
+- English Wikipedia only (no multi-language support)
 
-# Custom directory
-python enhance_biographies.py --cards-dir "/path/to/artists"
-```
+## API Credentials
 
-### Features
-- **Intelligent Assessment**: Only enhances when substantial new content is available
-- **Artist Network**: Extracts mentors, collaborators, influenced artists
-- **Enhanced Frontmatter**: Adds `musical_connections` and `biography_enhanced_at`
-- **Progress Tracking**: Real-time progress bar with connection counts
-- **Network Database**: Maintains `artist_connections.json` for visualization
+Spotify API credentials are embedded in source code for read-only operations. No user authentication required.
 
-### Example Output
-```yaml
----
-biography_enhanced_at: "2025-09-18T14:30:00Z"
-musical_connections:
-  mentors: ["Miles Davis", "Charlie Parker"]
-  collaborators: ["McCoy Tyner", "Elvin Jones"]
-  influenced: ["Pharoah Sanders", "David Murray"]
-  bands: ["John Coltrane Quartet"]
-network_extracted: true
----
-
-## Biography
-[Comprehensive AI-enhanced biography with **bolded artist names**]
-
-## Musical Connections
-### Mentors/Influences
-- **[[Miles Davis]]** - Provided crucial early career opportunities
-
-### Key Collaborators
-- **[[McCoy Tyner]]** - Pianist in the classic quartet
-```
-
-## Current Status (September 18, 2025)
-
-✅ **ALL MAJOR FEATURES COMPLETE + AI ENHANCEMENT + ACCURACY VERIFICATION**
-
-### Recently Added (September 18, 2025 - Latest Update)
-- **Biography Accuracy Verification**: AI-powered detection of artist/album/song mismatches
-- **Enhanced Wikipedia Search**: Improved entity type detection and disambiguation
-- **Automatic Re-fetching**: Corrects mismatched biographies by finding proper Wikipedia pages
-- **Cross-reference Validation**: Verifies Wikipedia content matches Spotify metadata
-- **Fixed "The Soul Rebels"**: Corrected album/artist confusion (was pulling Bob Marley's album)
-
-### Core Features Complete
-- **enhance_biographies.py**: Complete AI-powered biography enhancement system
-- **Artist Network Analysis**: Extracts and structures musical relationships
-- **Intelligent Content Assessment**: Gemini AI evaluates enhancement value
-- **Jazz Encyclopedia Foundation**: Connected network of artist relationships
-- **Full Testing**: Dry-run mode and real API integration verified
-
-### Recently Fixed
-- **Wikipedia Search Accuracy**: Better disambiguation between artists and albums/songs
-- **NoneType Errors**: Fixed description field handling in Wikipedia API responses
-- **Biography Mismatches**: Now detects and auto-corrects wrong entity types
-- **Streamlit File Browser**: Fixed session state conflicts and widget key issues
-
-### Known Minor Issues
-- Years active calculation needs refinement
-- Wikidata label extraction could be enhanced for birth places/instruments
-- Mobile sections API occasionally returns 403 errors
-
-### Next Priorities
-1. Integrate biography enhancement into Streamlit UI
-2. Add network visualization tools
-3. Improve Wikidata label extraction for places and instruments
-4. Add caching for API responses to reduce costs
-
-The project is feature-complete with AI-enhanced biographies, artist network analysis, and automatic accuracy verification, forming a robust foundation for a comprehensive jazz encyclopedia.
+For biography enhancement, obtain Google Gemini API key from https://makersuite.google.com/app/apikey and set as environment variable.
