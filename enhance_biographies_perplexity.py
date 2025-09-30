@@ -437,7 +437,9 @@ Key collaborations include work with McCoy Tyner, Elvin Jones, and Jimmy Garriso
                 "connections": mock_connections,
                 "fun_facts": mock_fun_facts,
                 "sources": ["Wikipedia", "AllMusic", "JazzTimes"],
-                "wikipedia_url": "https://en.wikipedia.org/wiki/Example_Artist"
+                "wikipedia_url": "https://en.wikipedia.org/wiki/Example_Artist",
+                "location_full": "New York, New York, United States",
+                "entity_type": "individual"
             }
 
         try:
@@ -488,7 +490,9 @@ RESPONSE FORMAT (JSON):
   }},
   "fun_facts": ["fact 1", "fact 2", "fact 3"],
   "wikipedia_url": "URL if found",
-  "sources": ["source1", "source2"]
+  "sources": ["source1", "source2"],
+  "location_full": "City, State/Region, Country (birthplace for individuals, origin for bands/groups)",
+  "entity_type": "individual" or "band" or "group"
 }}
 
 CRITICAL REQUIREMENTS:
@@ -813,6 +817,8 @@ Respond in JSON:
                 "connections": connections,
                 "new_wikipedia_url": new_wikipedia_url,
                 "research_sources": research_result.get('sources', []),
+                "location_full": research_result.get('location_full'),
+                "entity_type": research_result.get('entity_type'),
                 "reason": "Perplexity regeneration successful"
             }
 
@@ -1337,15 +1343,29 @@ class ArtistCardProcessor:
             # Clean up enhanced biography to remove duplicate headers
             cleaned_bio = self._clean_biography_content(enhanced_bio)
 
+            # Format citation sources (excluding Wikipedia)
+            research_sources = frontmatter.get('research_sources', [])
+            non_wiki_sources = [
+                source for source in research_sources
+                if 'wikipedia.org' not in source.lower()
+            ]
+
+            # Build sources line if we have non-Wikipedia sources
+            if non_wiki_sources:
+                source_links = [f"[Source{i+1}]({url})" for i, url in enumerate(non_wiki_sources)]
+                sources_line = f"\n\n*Sources: {', '.join(source_links)}*"
+            else:
+                sources_line = ""
+
             # Replace biography section in content
             bio_pattern = r'(## Biography\s*\n).*?(?=\n##|\n\*Source:|\Z)'
-            replacement = f'\\1{cleaned_bio}\n\n*Enhanced with Perplexity AI research*\n'
+            replacement = f'\\1{cleaned_bio}\n\n*Enhanced with Perplexity AI research*{sources_line}\n'
 
             if re.search(bio_pattern, content, re.DOTALL):
                 new_content = re.sub(bio_pattern, replacement, content, flags=re.DOTALL)
             else:
                 # Add biography section if not found
-                new_content = content + f"\n\n## Biography\n{cleaned_bio}\n\n*Enhanced with Perplexity AI research*\n"
+                new_content = content + f"\n\n## Biography\n{cleaned_bio}\n\n*Enhanced with Perplexity AI research*{sources_line}\n"
 
             # Reconstruct full file
             frontmatter_text = yaml.dump(frontmatter, default_flow_style=False, allow_unicode=True)
@@ -1426,6 +1446,8 @@ class ArtistCardProcessor:
                         connections = recovery_result.get('connections', {})
                         new_wikipedia_url = recovery_result.get('new_wikipedia_url')
                         research_sources = recovery_result.get('research_sources', [])
+                        location_full = recovery_result.get('location_full')
+                        entity_type = recovery_result.get('entity_type', '').lower()
 
                         # Update frontmatter with recovery metadata
                         frontmatter['data_quality'] = 'validated'
@@ -1437,6 +1459,22 @@ class ArtistCardProcessor:
                             if 'external_urls' not in frontmatter:
                                 frontmatter['external_urls'] = {}
                             frontmatter['external_urls']['wikipedia'] = new_wikipedia_url
+
+                        # Extract and store location data (recovery path)
+                        if not entity_type:
+                            # Detect from frontmatter
+                            if frontmatter.get('birth_date') or frontmatter.get('death_date') or frontmatter.get('birth_name'):
+                                entity_type = 'individual'
+                            else:
+                                entity_type = 'group'
+
+                        if location_full:
+                            if entity_type == 'individual':
+                                frontmatter['birth_place'] = location_full
+                                self.logger.info(f"Recovery: Updated birth_place to {location_full}")
+                            elif entity_type in ['band', 'group']:
+                                frontmatter['origin'] = location_full
+                                self.logger.info(f"Recovery: Updated origin to {location_full}")
 
                         # Update card
                         if self.update_artist_card(file_path, frontmatter, content, enhanced_bio, connections):
@@ -1507,6 +1545,27 @@ class ArtistCardProcessor:
                 if 'external_urls' not in frontmatter:
                     frontmatter['external_urls'] = {}
                 frontmatter['external_urls']['wikipedia'] = wikipedia_url
+
+            # Extract and store location data
+            location_full = research_result.get('location_full')
+            entity_type = research_result.get('entity_type', '').lower()
+
+            # Fallback entity type detection if not provided
+            if not entity_type:
+                # Detect from frontmatter: individuals have birth_date, death_date, or birth_name
+                if frontmatter.get('birth_date') or frontmatter.get('death_date') or frontmatter.get('birth_name'):
+                    entity_type = 'individual'
+                else:
+                    entity_type = 'group'  # Default to group for bands
+
+            # Update appropriate location field
+            if location_full:
+                if entity_type == 'individual':
+                    frontmatter['birth_place'] = location_full
+                    self.logger.info(f"Updated birth_place: {location_full}")
+                elif entity_type in ['band', 'group']:
+                    frontmatter['origin'] = location_full
+                    self.logger.info(f"Updated origin: {location_full}")
 
             # Update file
             if self.update_artist_card(file_path, frontmatter, content, enhanced_bio, connections):
