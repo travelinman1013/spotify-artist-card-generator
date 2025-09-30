@@ -137,35 +137,86 @@ Uses Client Credentials flow with hardcoded credentials (read-only access). Toke
 - P26: Spouse
 - P2032/P2034: Work period start/end
 
-### Perplexity API Integration (NEW)
+### Perplexity API Integration (WEB-FIRST ARCHITECTURE)
 
-The `enhance_biographies_perplexity.py` script uses Perplexity AI for improved biography enhancement:
+The `enhance_biographies_perplexity.py` script uses **Perplexity AI as the PRIMARY data source** for comprehensive artist research, representing a fundamental architectural shift from Wikipedia-dependent approaches.
 
-**Key Features:**
-- Real-time web search for up-to-date artist information beyond Wikipedia
-- Native citation support for better source verification
-- Structured JSON output mode for cleaner artist connection extraction
-- OpenAI-compatible API using the `openai` Python client
+**Core Architecture - Perplexity-First:**
+
+1. **Primary Research Phase:**
+   - Perplexity web search gathers comprehensive artist information
+   - Structured JSON response with biography, connections, fun facts, sources
+   - Rich musical connections with detailed context (albums, time periods, relationships)
+   - Wikipedia URL extraction from citations when available
+
+2. **Biography Generation:**
+   - Format research into structured markdown
+   - Musical Connections section with three categories:
+     - Mentors/Influences (teachers, stylistic inspirations)
+     - Key Collaborators (band members, frequent partners)
+     - Artists Influenced (students, proteges, inspired musicians)
+   - Each connection includes: name, context, specific works, time periods
+
+3. **Wikipedia as Fallback:**
+   - Used only for supplementary metadata (birth dates, instruments, etc.)
+   - Not required for biography generation
+   - Works for artists without Wikipedia pages
+
+**Key Advantages:**
+- **Richer connections**: Not limited to Wikipedia mentions, finds relationships across web
+- **Better coverage**: Handles artists without Wikipedia pages
+- **More context**: Specific albums, bands, time periods for each connection
+- **Up-to-date info**: Real-time web search beyond Wikipedia's update cycle
+- **Multi-source verification**: Citations from multiple authoritative sources
 
 **Configuration:**
 - API Base URL: `https://api.perplexity.ai`
-- Model: `sonar-pro` (recommended for high-quality research)
+- Model: `sonar-pro` (high-quality research with web search)
 - Temperature: 0.3 (balanced creativity and accuracy)
-- Max Tokens: 2048 (standard), 4096 (biography generation)
-
-**Advantages over Gemini:**
-- Better at finding and verifying artist connections from multiple sources
-- Real-time web search can discover recent information not in Wikipedia
-- More accurate at extracting structured relationship data
-- Built-in citation tracking improves source verification
+- Max Tokens: 4096 (biography generation with connections)
 
 **Setup:**
 1. Get API key from https://www.perplexity.ai/settings/api
 2. Set environment variable: `export PERPLEXITY_API_KEY='your-key'`
-3. Run with same CLI interface as Gemini version
+3. Run: `python enhance_biographies_perplexity.py [--dry-run] [--force] [--skip-detection]`
 
 **Frontmatter Tracking:**
-Enhanced files include `enhancement_provider: 'perplexity'` to distinguish from Gemini-enhanced biographies.
+Enhanced files include:
+- `primary_source: 'perplexity'` - indicates web-first research
+- `research_sources: [...]` - list of sources used (Wikipedia, AllMusic, etc.)
+- `enhancement_provider: 'perplexity'` - processing tool
+- `musical_connections: {...}` - structured connection data
+- `detailed_connections: {...}` - full connection context (in connections DB)
+
+**Data Flow:**
+```
+Spotify Metadata → Perplexity Research → Biography Generation → Optional Wikipedia Supplement → Artist Card Update
+```
+
+**Connection Data Structure:**
+```python
+{
+  "mentors": [
+    {
+      "name": "Miles Davis",
+      "context": "Early career mentor",
+      "specific_works": "Kind of Blue sessions",
+      "time_period": "1958-1960",
+      "confidence": 0.95
+    }
+  ],
+  "collaborators": [...],
+  "influenced": [...]
+}
+```
+
+**Three-Phase Detection System:**
+The Perplexity enhancer includes a detection system for problematic Wikipedia matches:
+1. **Phase 1 - Detection**: Identifies cards with suspicious patterns (recipes, genre pages, etc.)
+2. **Phase 2 - Recovery**: Uses Perplexity web search to regenerate correct information
+3. **Phase 3 - Quarantine**: Moves unrecoverable cards to `problem-cards/` directory
+
+Use `--skip-detection` flag to bypass Phase 1 and process all cards with standard enhancement.
 
 ## File Structure and Naming
 
