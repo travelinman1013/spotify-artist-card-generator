@@ -59,8 +59,8 @@ if 'enhancement_progress' not in st.session_state:
     st.session_state.enhancement_progress = 0
 if 'enhancement_log_output' not in st.session_state:
     st.session_state.enhancement_log_output = []
-if 'google_api_key' not in st.session_state:
-    st.session_state.google_api_key = ""
+if 'perplexity_api_key' not in st.session_state:
+    st.session_state.perplexity_api_key = ""
 if 'enhancement_stats' not in st.session_state:
     st.session_state.enhancement_stats = {}
 # Enhanced process control session state
@@ -419,137 +419,200 @@ def main():
                 st.info("🔄 Process running...")
     # Biography Enhancement Tab
     with tab3:
-        st.header("AI-Powered Biography Enhancement")
+        st.header("📚 Biography Enhancement with Perplexity AI")
+        st.markdown("Enhance artist biographies using Perplexity AI with intelligent detection and recovery system")
+        # Information box
+        with st.expander("ℹ️ About This Tool", expanded=False):
+            st.markdown("""
+            **Three-Phase Enhancement System:**
+
+            1. **Phase 1 - Detection**: Automatically identifies problematic Wikipedia matches (recipes, lists, genres instead of artists)
+            2. **Phase 2 - Recovery**: Attempts to recover using Perplexity web search for better information
+            3. **Phase 3 - Quarantine**: Moves unrecoverable cards to `problem-cards/` directory
+
+            **Features:**
+            - Real-time web search for up-to-date artist information
+            - Native citation support for source verification
+            - Artist relationship network extraction
+            - Automatic backup of original files
+            """)
         col1, col2 = st.columns([2, 1])
         with col1:
-            st.subheader("Configuration")
-            # Artist cards directory
-            cards_dir = st.text_input(
-                "Artist cards directory:",
-                value=st.session_state.config.get('artist_cards_dir', DEFAULT_ARTIST_CARDS_DIR),
-                key="enhancement_cards_dir",
-                help="Directory containing artist markdown files to enhance"
-            )
-            # Google API key input
-            api_key = st.text_input(
-                "Google Gemini API Key:",
-                value=st.session_state.google_api_key or os.getenv('GOOGLE_API_KEY', ''),
-                type="password",
-                key="google_api_key_input",
-                help="Required for AI biography enhancement. Get your key at https://makersuite.google.com/app/apikey"
-            )
-            # Store API key in session state
-            if api_key:
-                st.session_state.google_api_key = api_key
-            st.subheader("Options")
-            # Enhancement options
-            dry_run = st.checkbox(
-                "Dry run (preview only)",
-                value=False,
-                key="enhancement_dry_run",
-                help="Preview changes without modifying files"
-            )
-            force_enhance = st.checkbox(
-                "Force re-enhancement",
-                value=False,
-                key="enhancement_force",
-                help="Re-enhance files that have already been processed"
-            )
+            with st.expander("⚙️ Configuration", expanded=True):
+                # Artist cards directory
+                cards_dir = st.text_input(
+                    "Artist cards directory:",
+                    value=st.session_state.config.get('artist_cards_dir', DEFAULT_ARTIST_CARDS_DIR),
+                    key="enhancement_cards_dir",
+                    help="Directory containing artist markdown files to enhance"
+                )
+                # Perplexity API key input
+                api_key = st.text_input(
+                    "Perplexity API Key:",
+                    value=st.session_state.perplexity_api_key or os.getenv('PERPLEXITY_API_KEY', ''),
+                    type="password",
+                    key="perplexity_api_key_input",
+                    help="Required for AI biography enhancement. Get your key at https://www.perplexity.ai/settings/api"
+                )
+                # Store API key in session state
+                if api_key:
+                    st.session_state.perplexity_api_key = api_key
+                st.markdown("**Enhancement Options:**")
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    # Enhancement options
+                    dry_run = st.checkbox(
+                        "☐ Dry run (preview only)",
+                        value=False,
+                        key="enhancement_dry_run",
+                        help="Preview changes without modifying files"
+                    )
+                    force_enhance = st.checkbox(
+                        "☐ Force re-enhancement",
+                        value=False,
+                        key="enhancement_force",
+                        help="Re-enhance files that have already been processed"
+                    )
+                with col_b:
+                    skip_detection = st.checkbox(
+                        "☐ Skip detection",
+                        value=False,
+                        key="enhancement_skip_detection",
+                        help="Bypass problematic card detection (Phase 1)"
+                    )
+                    log_level = st.selectbox(
+                        "Log level:",
+                        ["INFO", "DEBUG", "WARNING", "ERROR"],
+                        index=0,
+                        key="enhancement_log_level"
+                    )
             # Prerequisites validation
-            st.subheader("Prerequisites Check")
-            # Check API key
-            if api_key:
-                st.success("✅ Google API Key provided")
-            else:
-                st.error("❌ Google API Key required")
-            # Check cards directory
-            if os.path.exists(cards_dir):
-                md_files = list(Path(cards_dir).glob("*.md"))
-                if md_files:
-                    st.success(f"✅ Found {len(md_files)} artist cards")
+            with st.expander("✓ Prerequisites Check", expanded=True):
+                # Check API key
+                if api_key:
+                    st.success("✅ Perplexity API Key provided")
                 else:
-                    st.warning("⚠️ No markdown files found in directory")
-            else:
-                st.error("❌ Artist cards directory not found")
+                    st.error("❌ Perplexity API Key required")
+                    st.markdown("**Setup Instructions:**")
+                    st.code("export PERPLEXITY_API_KEY='your-api-key-here'")
+                    st.markdown("Get your API key at: https://www.perplexity.ai/settings/api")
+                # Check cards directory
+                if os.path.exists(cards_dir):
+                    md_files = list(Path(cards_dir).glob("*.md"))
+                    if md_files:
+                        # Estimate processing time
+                        estimated_time = len(md_files) * 2  # 2 seconds per card
+                        estimated_minutes = estimated_time / 60
+                        st.success(f"✅ Found {len(md_files)} artist cards")
+                        st.info(f"⏱️ Estimated time: ~{estimated_minutes:.1f} minutes (rate limited)")
+                    else:
+                        st.warning("⚠️ No markdown files found in directory")
+                else:
+                    st.error("❌ Artist cards directory not found")
         with col2:
             st.subheader("Actions")
             # Check if prerequisites are met
             can_run = bool(api_key and os.path.exists(cards_dir))
             # Run button
-            if st.button(
-                "🧠 Enhance Biographies",
-                type="primary",
-                key="run_enhancement",
-                disabled=st.session_state.enhancement_running or not can_run
-            ):
-                if can_run:
-                    # Set environment variable for the subprocess
-                    os.environ['GOOGLE_API_KEY'] = api_key
-                    # Build command
-                    cmd = f"source venv/bin/activate && python enhance_biographies.py"
-                    cmd += f' --cards-dir "{cards_dir}"'
-                    if dry_run:
-                        cmd += " --dry-run"
-                    if force_enhance:
-                        cmd += " --force"
-                    cmd += " --log-level INFO"
-                    st.session_state.enhancement_running = True
-                    st.session_state.enhancement_log_output = []
-                    st.session_state.enhancement_stats = {}
-                    # Run command
-                    with st.spinner("Enhancing biographies..."):
-                        progress_bar = st.progress(0)
-                        log_area = st.empty()
-                        def update_progress(value):
-                            st.session_state.enhancement_progress = value
-                            progress_bar.progress(value)
-                        def update_log(line):
-                            st.session_state.enhancement_log_output.append(line)
-                            # Show last 20 lines for enhancement (detailed output)
-                            log_area.text_area(
-                                "Enhancement Log",
-"\n".join(st.session_state.enhancement_log_output[-20:]),
-                                height=400,
-                                key=f"enhancement_log_{len(st.session_state.enhancement_log_output)}"
+            col_btn1, col_btn2 = st.columns([1, 1])
+            with col_btn1:
+                if st.button(
+                    "🚀 Start Enhancement",
+                    type="primary",
+                    key="run_enhancement",
+                    disabled=st.session_state.enhancement_running or not can_run,
+                    use_container_width=True
+                ):
+                    if can_run:
+                        # Set environment variable for the subprocess
+                        os.environ['PERPLEXITY_API_KEY'] = api_key
+                        # Build command
+                        cmd = f"source venv/bin/activate && python enhance_biographies_perplexity.py"
+                        cmd += f' --cards-dir "{cards_dir}"'
+                        if dry_run:
+                            cmd += " --dry-run"
+                        if force_enhance:
+                            cmd += " --force"
+                        if skip_detection:
+                            cmd += " --skip-detection"
+                        cmd += f" --log-level {log_level}"
+                        st.session_state.enhancement_running = True
+                        st.session_state.enhancement_log_output = []
+                        st.session_state.enhancement_stats = {}
+                        # Run command
+                        with st.spinner("Enhancing biographies..."):
+                            progress_bar = st.progress(0)
+                            log_area = st.empty()
+                            def update_progress(value):
+                                st.session_state.enhancement_progress = value
+                                progress_bar.progress(value)
+                            def update_log(line):
+                                st.session_state.enhancement_log_output.append(line)
+                                # Show last 30 lines for enhancement (detailed output)
+                                log_area.text_area(
+                                    "Real-time Log Output",
+"\n".join(st.session_state.enhancement_log_output[-30:]),
+                                    height=400,
+                                    key=f"enhancement_log_{len(st.session_state.enhancement_log_output)}"
+                                )
+                            returncode, output = run_command_with_progress(
+                                cmd, update_progress, update_log
                             )
-                        returncode, output = run_command_with_progress(
-                            cmd, update_progress, update_log
-                        )
-                        st.session_state.enhancement_running = False
-                        if returncode == 0:
-                            st.success("✅ Biography enhancement completed successfully!")
-                            # Parse and display summary statistics
-                            summary_stats = {}
-                            for line in reversed(output):
-                                if "Enhanced:" in line:
-                                    match = re.search(r'Enhanced: (\d+)', line)
-                                    if match:
-                                        summary_stats['enhanced'] = int(match.group(1))
-                                elif "Connections found:" in line:
-                                    match = re.search(r'Connections found: (\d+)', line)
-                                    if match:
-                                        summary_stats['connections'] = int(match.group(1))
-                                elif "Network nodes:" in line:
-                                    match = re.search(r'Network nodes: (\d+)', line)
-                                    if match:
-                                        summary_stats['network_nodes'] = int(match.group(1))
-                                elif "Success rate:" in line:
-                                    match = re.search(r'Success rate: ([\d.]+)%', line)
-                                    if match:
-                                        summary_stats['success_rate'] = float(match.group(1))
-                            # Store stats for display
-                            st.session_state.enhancement_stats = summary_stats
-                            # Display key stats
-                            if summary_stats:
-                                st.info(f"Enhanced: {summary_stats.get('enhanced', 0)} artists")
-                                if summary_stats.get('connections'):
-                                    st.info(f"Connections found: {summary_stats.get('connections', 0)}")
-                                if summary_stats.get('success_rate'):
-                                    st.info(f"Success rate: {summary_stats.get('success_rate', 0):.1f}%")
-                        else:
-                            st.error(f"❌ Enhancement failed with error code {returncode}")
-                else:
-                    st.error("Prerequisites not met. Please check the requirements above.")
+                            st.session_state.enhancement_running = False
+                            if returncode == 0:
+                                st.success("✅ Biography enhancement completed successfully!")
+                                # Parse and display summary statistics
+                                summary_stats = {}
+                                for line in output:
+                                    # Enhanced count
+                                    if "✅ Enhanced:" in line:
+                                        match = re.search(r'Enhanced: (\d+)', line)
+                                        if match:
+                                            summary_stats['enhanced'] = int(match.group(1))
+                                    # Problems detected
+                                    elif "🔍 Problems detected:" in line:
+                                        match = re.search(r'Problems detected: (\d+)', line)
+                                        if match:
+                                            summary_stats['problems_detected'] = int(match.group(1))
+                                    # Recovered count
+                                    elif "✅ Recovered:" in line:
+                                        match = re.search(r'Recovered: (\d+)', line)
+                                        if match:
+                                            summary_stats['recovered'] = int(match.group(1))
+                                    # Quarantined count
+                                    elif "⚠️ Quarantined:" in line:
+                                        match = re.search(r'Quarantined: (\d+)', line)
+                                        if match:
+                                            summary_stats['quarantined'] = int(match.group(1))
+                                    # Connections found
+                                    elif "🔗 Connections found:" in line:
+                                        match = re.search(r'Connections found: (\d+)', line)
+                                        if match:
+                                            summary_stats['connections'] = int(match.group(1))
+                                    # Network nodes
+                                    elif "📚 Network nodes:" in line:
+                                        match = re.search(r'Network nodes: (\d+)', line)
+                                        if match:
+                                            summary_stats['network_nodes'] = int(match.group(1))
+                                    # Success rate
+                                    elif "🎯 Success rate:" in line:
+                                        match = re.search(r'Success rate: ([\d.]+)%', line)
+                                        if match:
+                                            summary_stats['success_rate'] = float(match.group(1))
+                                # Store stats for display
+                                st.session_state.enhancement_stats = summary_stats
+                            else:
+                                st.error(f"❌ Enhancement failed with error code {returncode}")
+                    else:
+                        st.error("Prerequisites not met. Please check the requirements above.")
+            with col_btn2:
+                if st.button(
+                    "⏹️ Stop",
+                    key="stop_enhancement",
+                    disabled=not st.session_state.enhancement_running,
+                    use_container_width=True
+                ):
+                    st.warning("Stop functionality requires process management - use Ctrl+C in terminal")
             # Progress display
             if st.session_state.enhancement_running:
                 st.info("🔄 Enhancement in progress...")
@@ -558,36 +621,42 @@ def main():
                 log_content = "\n".join(st.session_state.enhancement_log_output)
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 st.download_button(
-                    label="📥 Download Enhancement Log",
+                    label="📥 Download Log",
                     data=log_content,
-                    file_name=f"biography_enhancement_log_{timestamp}.txt",
-                    mime="text/plain"
+                    file_name=f"perplexity_enhancement_{timestamp}.txt",
+                    mime="text/plain",
+                    use_container_width=True
                 )
-            # Statistics display
-            if st.session_state.enhancement_stats:
-                st.subheader("Results Summary")
-                stats = st.session_state.enhancement_stats
-                col_a, col_b = st.columns(2)
-                with col_a:
-                    if 'enhanced' in stats:
-                        st.metric("Enhanced", stats['enhanced'])
-                    if 'connections' in stats:
-                        st.metric("Connections", stats['connections'])
-                with col_b:
-                    if 'network_nodes' in stats:
-                        st.metric("Network Nodes", stats['network_nodes'])
-                    if 'success_rate' in stats:
-                        st.metric("Success Rate", f"{stats['success_rate']:.1f}%")
-        # Enhanced Logging Display for Biography Enhancement
-        st.markdown("---")
-        st.subheader("📋 Enhanced Process Logs")
-        # Initialize enhanced logger if not exists
-        if 'enhancement_logger' not in st.session_state:
-            st.session_state.enhancement_logger = EnhancedLogger("enhancement")
-        # Render enhanced log display
-        render_enhanced_log_display(st.session_state.enhancement_logger, "enhancement")
-        # Cleanup old logs
-        cleanup_old_logs()
+        # Statistics display
+        if st.session_state.enhancement_stats:
+            st.markdown("---")
+            st.subheader("📊 Summary Statistics")
+            stats = st.session_state.enhancement_stats
+            # Create metrics in columns
+            col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+            with col_m1:
+                if 'enhanced' in stats:
+                    st.metric("✅ Enhanced", stats['enhanced'])
+                if 'problems_detected' in stats:
+                    st.metric("🔍 Problems Detected", stats['problems_detected'])
+            with col_m2:
+                if 'recovered' in stats:
+                    st.metric("✅ Recovered", stats['recovered'])
+                if 'quarantined' in stats:
+                    st.metric("⚠️ Quarantined", stats['quarantined'])
+            with col_m3:
+                if 'connections' in stats:
+                    st.metric("🔗 Connections", stats['connections'])
+                if 'network_nodes' in stats:
+                    st.metric("📚 Network Nodes", stats['network_nodes'])
+            with col_m4:
+                if 'success_rate' in stats:
+                    st.metric("🎯 Success Rate", f"{stats['success_rate']:.1f}%")
+            # Show link to quarantine directory if cards were quarantined
+            if stats.get('quarantined', 0) > 0:
+                quarantine_dir = Path(cards_dir) / "problem-cards"
+                st.warning(f"⚠️ {stats['quarantined']} problematic cards moved to: `{quarantine_dir}`")
+                st.info("💡 Review quarantined cards to verify detection accuracy or manually fix issues")
     # Settings Tab
     with tab4:
         st.header("Settings")
@@ -604,24 +673,25 @@ def main():
             "Default archive search directory:",
             value=st.session_state.config.get('archive_dir', DEFAULT_ARCHIVE_DIR)
         )
-        # Google API Key storage
+        # Perplexity API Key storage
         st.subheader("API Configuration")
         stored_api_key = st.text_input(
-            "Google Gemini API Key (for biography enhancement):",
-            value=st.session_state.google_api_key,
+            "Perplexity API Key (for biography enhancement):",
+            value=st.session_state.perplexity_api_key,
             type="password",
             help="This key is stored only for the current session and not saved to disk"
         )
-        if stored_api_key != st.session_state.google_api_key:
-            st.session_state.google_api_key = stored_api_key
+        if stored_api_key != st.session_state.perplexity_api_key:
+            st.session_state.perplexity_api_key = stored_api_key
         # Environment variable check
-        env_api_key = os.getenv('GOOGLE_API_KEY')
+        env_api_key = os.getenv('PERPLEXITY_API_KEY')
         if env_api_key:
-            st.success("✅ GOOGLE_API_KEY environment variable detected")
+            st.success("✅ PERPLEXITY_API_KEY environment variable detected")
         elif stored_api_key:
             st.info("ℹ️ Using API key from session (not persistent)")
         else:
-            st.warning("⚠️ No Google API key configured")
+            st.warning("⚠️ No Perplexity API key configured")
+            st.markdown("Get your API key at: https://www.perplexity.ai/settings/api")
         if st.button("💾 Save Settings"):
             st.session_state.config['artist_cards_dir'] = new_cards_dir
             st.session_state.config['artist_images_dir'] = new_images_dir
