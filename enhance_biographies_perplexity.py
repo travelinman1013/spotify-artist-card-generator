@@ -64,6 +64,9 @@ REQUEST_TIMEOUT = 30
 RATE_LIMIT_DELAY = 2.0  # Delay between API requests
 MAX_RETRIES = 3
 
+# Progress reporting (for UI integration)
+ENABLE_JSON_PROGRESS = os.getenv('ENABLE_JSON_PROGRESS', '').lower() == 'true'
+
 # Perplexity Configuration
 PERPLEXITY_API_BASE = "https://api.perplexity.ai"
 PERPLEXITY_MODEL = "sonar-pro"
@@ -106,6 +109,38 @@ GENERIC_ASSOCIATED_ACTS = [
 DETECTION_CONFIDENCE_HIGH = 0.9
 DETECTION_CONFIDENCE_MEDIUM = 0.7
 DETECTION_CONFIDENCE_LOW = 0.5
+
+
+def emit_progress_json(artist_name: str, status: str, percent: float,
+                      connections: int = 0, time_elapsed: float = 0.0,
+                      result: str = "", total_processed: int = 0, total_files: int = 0):
+    """
+    Emit progress information as JSON to stdout for UI consumption.
+
+    Args:
+        artist_name: Name of the artist being processed
+        status: Current status (started|detecting|recovering|enhancing|complete|error)
+        percent: Progress percentage (0.0 to 1.0)
+        connections: Number of connections found
+        time_elapsed: Time elapsed in seconds
+        result: Final result message (for complete/error status)
+        total_processed: Total number of artists processed so far
+        total_files: Total number of files to process
+    """
+    if ENABLE_JSON_PROGRESS:
+        progress_data = {
+            "type": "progress",
+            "artist": artist_name,
+            "status": status,
+            "percent": percent,
+            "connections": connections,
+            "time_elapsed": round(time_elapsed, 2),
+            "result": result,
+            "total_processed": total_processed,
+            "total_files": total_files
+        }
+        # Print to stdout for parsing by UI
+        print(json.dumps(progress_data), flush=True)
 
 
 class WikipediaExtractor:
@@ -262,12 +297,33 @@ Criteria for "no": Existing summary captures most key biographical information""
                 max_tokens=PERPLEXITY_MAX_TOKENS
             )
 
-            # Parse JSON response
-            response_text = response.choices[0].message.content.strip()
-            if response_text.startswith('```json'):
-                response_text = response_text.replace('```json', '').replace('```', '').strip()
+            # Validate and parse JSON response
+            if not response or not response.choices or not response.choices[0].message:
+                self.logger.error("Invalid assessment response structure")
+                return {
+                    "should_enhance": "no",
+                    "reason": "Invalid API response",
+                    "mentioned_artists": [],
+                    "key_collaborations": [],
+                    "additional_content_areas": []
+                }
 
-            assessment = json.loads(response_text)
+            response_text = response.choices[0].message.content.strip()
+
+            # Parse JSON with robust error handling
+            success, assessment, error_msg = self._parse_json_response(
+                response_text, "assessment", "content assessment"
+            )
+
+            if not success:
+                self.logger.error(f"Failed to parse assessment response: {error_msg}")
+                return {
+                    "should_enhance": "no",
+                    "reason": f"Assessment parsing failed: {error_msg}",
+                    "mentioned_artists": [],
+                    "key_collaborations": [],
+                    "additional_content_areas": []
+                }
 
             self.logger.info(f"Assessment result: {assessment.get('should_enhance', 'unknown')}")
             return assessment
@@ -504,57 +560,96 @@ CRITICAL REQUIREMENTS:
 
             self.logger.info(f"Researching artist with Perplexity: {artist_name}")
 
-            response = self.client.chat.completions.create(
-                model=PERPLEXITY_MODEL,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are an expert music researcher with access to web search. Provide accurate, well-researched information about musical artists. Always respond with valid JSON only. Focus heavily on finding and verifying musical connections and relationships."
-                    },
-                    {
-                        "role": "user",
-                        "content": research_prompt
+            # Retry mechanism with exponential backoff
+            max_retries = 3
+            retry_delays = [2, 4, 8]  # seconds
+            last_error = None
+
+            for attempt in range(max_retries):
+                try:
+                    if attempt > 0:
+                        delay = retry_delays[attempt - 1]
+                        self.logger.info(f"Retry attempt {attempt + 1}/{max_retries} for {artist_name} after {delay}s delay")
+                        time.sleep(delay)
+
+                    response = self.client.chat.completions.create(
+                        model=PERPLEXITY_MODEL,
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": "You are an expert music researcher with access to web search. Provide accurate, well-researched information about musical artists. Always respond with valid JSON only. Focus heavily on finding and verifying musical connections and relationships."
+                            },
+                            {
+                                "role": "user",
+                                "content": research_prompt
+                            }
+                        ],
+                        temperature=0.3,
+                        max_tokens=PERPLEXITY_MAX_TOKENS * 2
+                    )
+
+                    # Validate response structure
+                    if not response or not hasattr(response, 'choices') or not response.choices:
+                        self.logger.error(f"Invalid API response structure for {artist_name}")
+                        last_error = "Invalid API response structure"
+                        continue
+
+                    if not response.choices[0].message or not response.choices[0].message.content:
+                        self.logger.error(f"Empty message content in API response for {artist_name}")
+                        last_error = "Empty message content from API"
+                        continue
+
+                    # Extract response text
+                    response_text = response.choices[0].message.content.strip()
+
+                    # Check for API error messages
+                    if response_text.startswith("Error:") or response_text.startswith("error:"):
+                        self.logger.error(f"API error for {artist_name}: {response_text}")
+                        last_error = f"API error: {response_text}"
+                        continue
+
+                    # Parse JSON with robust error handling
+                    success, research_data, error_msg = self._parse_json_response(
+                        response_text, artist_name, "research response"
+                    )
+
+                    if not success:
+                        last_error = error_msg
+                        continue
+
+                    # Validate response content
+                    if not research_data.get('biography'):
+                        self.logger.warning(f"No biography in research response for {artist_name}")
+                        return {"success": False, "reason": "No biography found"}
+
+                    # Add confidence scores to connections if not present
+                    for conn_type in ['mentors', 'collaborators', 'influenced']:
+                        if conn_type in research_data.get('connections', {}):
+                            for connection in research_data['connections'][conn_type]:
+                                if 'confidence' not in connection:
+                                    # High confidence by default since Perplexity has verified via web search
+                                    connection['confidence'] = 0.95
+
+                    self.logger.info(f"Research successful: {len(research_data.get('biography', ''))} chars, "
+                                   f"{sum(len(v) for v in research_data.get('connections', {}).values())} connections")
+
+                    return {
+                        "success": True,
+                        **research_data
                     }
-                ],
-                temperature=0.3,
-                max_tokens=PERPLEXITY_MAX_TOKENS * 2
-            )
 
-            # Parse JSON response
-            response_text = response.choices[0].message.content.strip()
-            if response_text.startswith('```json'):
-                response_text = response_text.replace('```json', '').replace('```', '').strip()
+                except Exception as e:
+                    self.logger.error(f"Error in Perplexity API call for {artist_name} (attempt {attempt + 1}): {e}")
+                    last_error = str(e)
+                    continue
 
-            research_data = json.loads(response_text)
+            # All retries exhausted
+            self.logger.error(f"All {max_retries} retry attempts failed for {artist_name}")
+            return {"success": False, "reason": f"Research failed after {max_retries} attempts: {last_error}"}
 
-            # Validate response
-            if not research_data.get('biography'):
-                self.logger.warning(f"No biography in research response for {artist_name}")
-                return {"success": False, "reason": "No biography found"}
-
-            # Add confidence scores to connections if not present
-            for conn_type in ['mentors', 'collaborators', 'influenced']:
-                if conn_type in research_data.get('connections', {}):
-                    for connection in research_data['connections'][conn_type]:
-                        if 'confidence' not in connection:
-                            # High confidence by default since Perplexity has verified via web search
-                            connection['confidence'] = 0.95
-
-            self.logger.info(f"Research successful: {len(research_data.get('biography', ''))} chars, "
-                           f"{sum(len(v) for v in research_data.get('connections', {}).values())} connections")
-
-            return {
-                "success": True,
-                **research_data
-            }
-
-        except json.JSONDecodeError as e:
-            self.logger.error(f"Failed to parse JSON response: {e}")
-            self.logger.debug(f"Response text: {response_text[:500]}")
-            return {"success": False, "reason": f"JSON parsing failed: {e}"}
         except Exception as e:
-            self.logger.error(f"Error in Perplexity research: {e}")
-            return {"success": False, "reason": f"Research failed: {e}"}
+            self.logger.error(f"Unexpected error in Perplexity research for {artist_name}: {e}")
+            return {"success": False, "reason": f"Unexpected research error: {e}"}
 
     def generate_biography_from_research(self, research_data: Dict[str, Any], artist_name: str) -> Dict[str, Any]:
         """
@@ -736,12 +831,31 @@ Respond in JSON:
                 max_tokens=512
             )
 
-            # Parse response
-            response_text = response.choices[0].message.content.strip()
-            if response_text.startswith('```json'):
-                response_text = response_text.replace('```json', '').replace('```', '').strip()
+            # Validate and parse response
+            if not response or not response.choices or not response.choices[0].message:
+                self.logger.error(f"Invalid verification response structure for {artist_name}")
+                return {
+                    "is_accurate": True,
+                    "confidence": 0.5,
+                    "reason": "Invalid API response",
+                    "issues": []
+                }
 
-            verification = json.loads(response_text)
+            response_text = response.choices[0].message.content.strip()
+
+            # Parse JSON with robust error handling
+            success, verification, error_msg = self._parse_json_response(
+                response_text, artist_name, "verification response"
+            )
+
+            if not success:
+                self.logger.error(f"Failed to parse verification response for {artist_name}: {error_msg}")
+                return {
+                    "is_accurate": True,  # Default to true to avoid false positives
+                    "confidence": 0.5,
+                    "reason": f"Verification parsing failed: {error_msg}",
+                    "issues": []
+                }
 
             self.logger.info(f"Verification result for {artist_name}: {verification.get('is_accurate')} "
                            f"(confidence: {verification.get('confidence', 0):.2f})")
@@ -907,6 +1021,58 @@ Respond in JSON:
 
         return None
 
+    def _parse_json_response(self, response_text: str, artist_name: str, context: str = "response") -> Tuple[bool, Optional[Dict[str, Any]], str]:
+        """
+        Safely parse JSON response from Perplexity with robust error handling.
+
+        Args:
+            response_text: Raw response text from Perplexity
+            artist_name: Artist name for error logging
+            context: Context description for error messages
+
+        Returns:
+            Tuple of (success, parsed_data, error_message)
+        """
+        import re
+
+        # Check if response is empty
+        if not response_text or not response_text.strip():
+            self.logger.error(f"Empty {context} from Perplexity for {artist_name}")
+            return False, None, "Empty response from API"
+
+        # Log first 200 chars for debugging
+        self.logger.debug(f"Response preview for {artist_name}: {response_text[:200]}")
+
+        # Try to clean markdown code blocks
+        cleaned_text = response_text.strip()
+        if cleaned_text.startswith('```json'):
+            cleaned_text = cleaned_text.replace('```json', '').replace('```', '').strip()
+        elif cleaned_text.startswith('```'):
+            cleaned_text = cleaned_text.replace('```', '').strip()
+
+        # Try to find JSON object boundaries if text contains extra content
+        if not cleaned_text.startswith('{'):
+            # Try to extract JSON object using regex
+            json_match = re.search(r'\{.*\}', cleaned_text, re.DOTALL)
+            if json_match:
+                cleaned_text = json_match.group(0)
+                self.logger.debug(f"Extracted JSON object from surrounding text for {artist_name}")
+            else:
+                self.logger.error(f"No JSON object found in {context} for {artist_name}")
+                self.logger.error(f"Full response text: {response_text}")
+                return False, None, f"No valid JSON object found in {context}"
+
+        # Attempt to parse JSON
+        try:
+            parsed_data = json.loads(cleaned_text)
+            self.logger.debug(f"Successfully parsed JSON {context} for {artist_name}")
+            return True, parsed_data, ""
+        except json.JSONDecodeError as e:
+            self.logger.error(f"JSON parsing failed for {artist_name} in {context}: {e}")
+            self.logger.error(f"Attempted to parse: {cleaned_text[:1000]}")
+            self.logger.error(f"Full original response: {response_text}")
+            return False, None, f"JSON parsing error: {str(e)}"
+
 
 class ArtistCardProcessor:
     """Main processor for enhancing artist cards and managing connections."""
@@ -941,6 +1107,10 @@ class ArtistCardProcessor:
             'recovered': 0,
             'quarantined': 0
         }
+
+        # Progress tracking for UI
+        self.total_files = 0
+        self.artist_start_times = {}  # Track start time per artist
 
     def _load_connections(self) -> Dict[str, Any]:
         """Load existing connections database or create new one."""
@@ -1407,6 +1577,17 @@ class ArtistCardProcessor:
             self.stats['processed'] += 1
             artist_name = file_path.stem.replace('_', ' ')
 
+            # Track start time for this artist
+            start_time = time.time()
+            self.artist_start_times[artist_name] = start_time
+
+            # Emit start event
+            emit_progress_json(
+                artist_name, "started", 0.0,
+                total_processed=self.stats['processed'],
+                total_files=self.total_files
+            )
+
             # Parse file
             frontmatter, content = self.parse_frontmatter(file_path)
 
@@ -1422,6 +1603,14 @@ class ArtistCardProcessor:
 
             # === PHASE 1: DETECTION (Pre-Enhancement) ===
             if not self.skip_detection:
+                # Emit detection event
+                emit_progress_json(
+                    artist_name, "detecting", 0.1,
+                    time_elapsed=time.time() - start_time,
+                    total_processed=self.stats['processed'],
+                    total_files=self.total_files
+                )
+
                 is_problematic, confidence, issues = self.detect_problematic_card(frontmatter, content)
 
                 if is_problematic and confidence >= DETECTION_CONFIDENCE_MEDIUM:
@@ -1431,6 +1620,14 @@ class ArtistCardProcessor:
 
                     # === PHASE 2: RECOVERY ATTEMPT ===
                     self.logger.info(f"🔄 Attempting Perplexity recovery for {artist_name}")
+
+                    # Emit recovery event
+                    emit_progress_json(
+                        artist_name, "recovering", 0.3,
+                        time_elapsed=time.time() - start_time,
+                        total_processed=self.stats['processed'],
+                        total_files=self.total_files
+                    )
                     recovery_result = self.perplexity_analyzer.regenerate_with_perplexity(
                         artist_name, frontmatter, issues
                     )
@@ -1490,10 +1687,31 @@ class ArtistCardProcessor:
 
                             self.stats['recovered'] += 1
                             connection_count = sum(len(v) if isinstance(v, list) else 0 for v in connections.values())
-                            return f"✅ Recovered ({connection_count} connections)"
+                            result_msg = f"✅ Recovered ({connection_count} connections)"
+
+                            # Emit completion event
+                            emit_progress_json(
+                                artist_name, "complete", 1.0,
+                                connections=connection_count,
+                                time_elapsed=time.time() - start_time,
+                                result=result_msg,
+                                total_processed=self.stats['processed'],
+                                total_files=self.total_files
+                            )
+                            return result_msg
                         else:
                             self.stats['errors'] += 1
-                            return "❌ Recovery update failed"
+                            result_msg = "❌ Recovery update failed"
+
+                            # Emit error event
+                            emit_progress_json(
+                                artist_name, "error", 1.0,
+                                time_elapsed=time.time() - start_time,
+                                result=result_msg,
+                                total_processed=self.stats['processed'],
+                                total_files=self.total_files
+                            )
+                            return result_msg
 
                     else:
                         # === PHASE 3: QUARANTINE ===
@@ -1501,13 +1719,41 @@ class ArtistCardProcessor:
 
                         if self.quarantine_card(file_path, frontmatter, issues, recovery_result.get('reason', 'Unknown')):
                             self.stats['quarantined'] += 1
-                            return f"⚠️ Quarantined: {recovery_result.get('reason', 'No credible info')}"
+                            result_msg = f"⚠️ Quarantined: {recovery_result.get('reason', 'No credible info')}"
+
+                            # Emit completion event (quarantine counts as complete)
+                            emit_progress_json(
+                                artist_name, "complete", 1.0,
+                                time_elapsed=time.time() - start_time,
+                                result=result_msg,
+                                total_processed=self.stats['processed'],
+                                total_files=self.total_files
+                            )
+                            return result_msg
                         else:
                             self.stats['errors'] += 1
-                            return "❌ Quarantine failed"
+                            result_msg = "❌ Quarantine failed"
+
+                            # Emit error event
+                            emit_progress_json(
+                                artist_name, "error", 1.0,
+                                time_elapsed=time.time() - start_time,
+                                result=result_msg,
+                                total_processed=self.stats['processed'],
+                                total_files=self.total_files
+                            )
+                            return result_msg
 
             # === NEW: PERPLEXITY-FIRST ENHANCEMENT FLOW ===
             self.logger.info(f"🔍 Starting Perplexity-first research for {artist_name}")
+
+            # Emit enhancement event
+            emit_progress_json(
+                artist_name, "enhancing", 0.4,
+                time_elapsed=time.time() - start_time,
+                total_processed=self.stats['processed'],
+                total_files=self.total_files
+            )
 
             # PHASE 1: Primary research with Perplexity web search
             research_result = self.perplexity_analyzer.research_artist_with_perplexity(
@@ -1520,7 +1766,17 @@ class ArtistCardProcessor:
             if not research_result.get('success'):
                 self.logger.error(f"Perplexity research failed: {research_result.get('reason')}")
                 self.stats['errors'] += 1
-                return f"❌ Research failed: {research_result.get('reason', 'Unknown')}"
+                result_msg = f"❌ Research failed: {research_result.get('reason', 'Unknown')}"
+
+                # Emit error event
+                emit_progress_json(
+                    artist_name, "error", 1.0,
+                    time_elapsed=time.time() - start_time,
+                    result=result_msg,
+                    total_processed=self.stats['processed'],
+                    total_files=self.total_files
+                )
+                return result_msg
 
             # PHASE 2: Format biography from research data
             enhancement_result = self.perplexity_analyzer.generate_biography_from_research(
@@ -1533,7 +1789,17 @@ class ArtistCardProcessor:
 
             if not enhanced_bio:
                 self.stats['errors'] += 1
-                return "❌ Biography formatting failed"
+                result_msg = "❌ Biography formatting failed"
+
+                # Emit error event
+                emit_progress_json(
+                    artist_name, "error", 1.0,
+                    time_elapsed=time.time() - start_time,
+                    result=result_msg,
+                    total_processed=self.stats['processed'],
+                    total_files=self.total_files
+                )
+                return result_msg
 
             # PHASE 3: Optional Wikipedia metadata supplement
             wikipedia_url = research_result.get('wikipedia_url') or frontmatter.get('external_urls', {}).get('wikipedia')
@@ -1590,15 +1856,50 @@ class ArtistCardProcessor:
                     for v in detailed_connections.values()
                 )
 
-                return f"✅ Enhanced via Perplexity ({connection_count} connections, {len(research_result.get('sources', []))} sources)"
+                result_msg = f"✅ Enhanced via Perplexity ({connection_count} connections, {len(research_result.get('sources', []))} sources)"
+
+                # Emit completion event
+                emit_progress_json(
+                    artist_name, "complete", 1.0,
+                    connections=connection_count,
+                    time_elapsed=time.time() - start_time,
+                    result=result_msg,
+                    total_processed=self.stats['processed'],
+                    total_files=self.total_files
+                )
+                return result_msg
             else:
                 self.stats['errors'] += 1
-                return "❌ File update failed"
+                result_msg = "❌ File update failed"
+
+                # Emit error event
+                emit_progress_json(
+                    artist_name, "error", 1.0,
+                    time_elapsed=time.time() - start_time,
+                    result=result_msg,
+                    total_processed=self.stats['processed'],
+                    total_files=self.total_files
+                )
+                return result_msg
 
         except Exception as e:
             self.stats['errors'] += 1
             self.logger.error(f"Error processing {file_path}: {e}")
-            return f"❌ Error: {str(e)[:50]}"
+            result_msg = f"❌ Error: {str(e)[:50]}"
+
+            # Get artist name and start time safely
+            artist_name = file_path.stem.replace('_', ' ') if file_path else "Unknown"
+            elapsed = time.time() - self.artist_start_times.get(artist_name, time.time())
+
+            # Emit error event
+            emit_progress_json(
+                artist_name, "error", 1.0,
+                time_elapsed=elapsed,
+                result=result_msg,
+                total_processed=self.stats['processed'],
+                total_files=self.total_files
+            )
+            return result_msg
 
     def process_all_files(self) -> None:
         """Process all artist card files with progress tracking."""
@@ -1607,6 +1908,9 @@ class ArtistCardProcessor:
         if not files:
             self.logger.warning("No artist card files found")
             return
+
+        # Set total files for progress tracking
+        self.total_files = len(files)
 
         print(f"\n🎵 Jazz Encyclopedia Enhancement Tool (Perplexity Edition)")
         print(f"Scanning: {self.cards_dir}")
@@ -1662,12 +1966,15 @@ def setup_logging(log_level: str) -> None:
     if not isinstance(numeric_level, int):
         raise ValueError(f'Invalid log level: {log_level}')
 
+    # When JSON progress is enabled, send logs to stderr to keep stdout clean for JSON
+    stream_handler = logging.StreamHandler(sys.stderr if ENABLE_JSON_PROGRESS else sys.stdout)
+
     logging.basicConfig(
         level=numeric_level,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         handlers=[
             logging.FileHandler('biography_enhancer_perplexity.log'),
-            logging.StreamHandler()
+            stream_handler
         ]
     )
 

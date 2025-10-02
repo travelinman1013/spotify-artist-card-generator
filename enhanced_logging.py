@@ -34,6 +34,7 @@ class EnhancedLogger:
         self.name = name
         self.max_entries = max_entries
         self.entries = []
+        self.artist_logs = {}  # {artist_name: [entries]}
         self.log_file = None
         self.stats = {'info': 0, 'error': 0, 'success': 0, 'warning': 0, 'total': 0}
         self._create_log_file()
@@ -46,14 +47,15 @@ class EnhancedLogger:
             st.session_state.log_files = {}
         st.session_state.log_files[self.name] = str(self.log_file)
 
-    def add_entry(self, message: str, level: str = "INFO"):
-        """Add log entry with timestamp and level."""
+    def add_entry(self, message: str, level: str = "INFO", artist: str = None):
+        """Add log entry with timestamp and level, optionally associate with artist."""
         timestamp = datetime.now().strftime("%H:%M:%S")
         entry = {
             'timestamp': timestamp,
             'level': level.upper(),
             'message': message,
-            'color': self._get_color(level)
+            'color': self._get_color(level),
+            'artist': artist
         }
 
         self.entries.append(entry)
@@ -61,6 +63,16 @@ class EnhancedLogger:
         if level_key in self.stats:
             self.stats[level_key] += 1
         self.stats['total'] += 1
+
+        # Add to artist-specific log if artist provided
+        if artist:
+            if artist not in self.artist_logs:
+                self.artist_logs[artist] = []
+            self.artist_logs[artist].append(entry)
+
+            # Maintain buffer size per artist
+            if len(self.artist_logs[artist]) > self.max_entries:
+                self.artist_logs[artist].pop(0)
 
         # Maintain buffer size
         if len(self.entries) > self.max_entries:
@@ -70,7 +82,8 @@ class EnhancedLogger:
         if self.log_file:
             try:
                 with open(self.log_file, 'a', encoding='utf-8') as f:
-                    f.write(f"[{timestamp}] {level}: {message}\n")
+                    artist_prefix = f"[{artist}] " if artist else ""
+                    f.write(f"[{timestamp}] {artist_prefix}{level}: {message}\n")
             except Exception:
                 pass  # Ignore file write errors
 
@@ -85,13 +98,20 @@ class EnhancedLogger:
         }
         return colors.get(level.upper(), '#333333')
 
-    def get_filtered_entries(self, search_term: str = "", filters: Dict[str, bool] = None) -> List[Dict]:
-        """Get filtered log entries."""
+    def get_filtered_entries(self, search_term: str = "", filters: Dict[str, bool] = None,
+                            artist: str = None) -> List[Dict]:
+        """Get filtered log entries, optionally for a specific artist."""
         if filters is None:
             filters = {'show_info': True, 'show_error': True, 'show_success': True, 'show_warning': True}
 
+        # Get entries for specific artist or all entries
+        if artist and artist in self.artist_logs:
+            source_entries = self.artist_logs[artist]
+        else:
+            source_entries = self.entries
+
         filtered = []
-        for entry in self.entries:
+        for entry in source_entries:
             # Level filter
             level_key = f"show_{entry['level'].lower()}"
             if level_key in filters and not filters[level_key]:
@@ -105,9 +125,14 @@ class EnhancedLogger:
 
         return filtered
 
+    def get_artist_list(self) -> List[str]:
+        """Get list of artists with logs."""
+        return list(self.artist_logs.keys())
+
     def clear(self):
         """Clear all log entries and reset stats."""
         self.entries.clear()
+        self.artist_logs.clear()
         self.stats = {'info': 0, 'error': 0, 'success': 0, 'warning': 0, 'total': 0}
 
 class ProcessManager:
@@ -257,7 +282,7 @@ def cleanup_old_logs(max_age_hours: int = 24):
     except Exception:
         pass  # Ignore cleanup errors
 
-def render_enhanced_log_display(logger: EnhancedLogger, container_key: str):
+def render_enhanced_log_display(logger: EnhancedLogger, container_key: str, artist_filter: str = None):
     """Render enhanced log display with filtering and controls."""
 
     # Initialize session state for filters if not exists
@@ -270,9 +295,13 @@ def render_enhanced_log_display(logger: EnhancedLogger, container_key: str):
         }
     if 'log_search' not in st.session_state:
         st.session_state.log_search = ""
+    if 'log_auto_scroll' not in st.session_state:
+        st.session_state.log_auto_scroll = True
+    if 'log_height' not in st.session_state:
+        st.session_state.log_height = "Medium (500px)"
 
     # Log controls
-    col1, col2, col3 = st.columns([2, 2, 1])
+    col1, col2, col3, col4 = st.columns([2, 2, 1, 1])
 
     with col1:
         search_term = st.text_input(
@@ -306,8 +335,34 @@ def render_enhanced_log_display(logger: EnhancedLogger, container_key: str):
         st.session_state.log_filters = filters
 
     with col3:
+        auto_scroll = st.toggle("Auto-scroll", value=st.session_state.log_auto_scroll, key=f"autoscroll_{container_key}")
+        st.session_state.log_auto_scroll = auto_scroll
+
+    with col4:
         if st.button("🗑️ Clear", key=f"clear_{container_key}"):
             logger.clear()
+
+    # Height selector
+    height_option = st.selectbox(
+        "Log viewer height:",
+        ["Small (300px)", "Medium (500px)", "Large (700px)", "Extra Large (1000px)"],
+        index=["Small (300px)", "Medium (500px)", "Large (700px)", "Extra Large (1000px)"].index(st.session_state.log_height),
+        key=f"height_{container_key}"
+    )
+    st.session_state.log_height = height_option
+
+    # Parse height value
+    height_map = {
+        "Small (300px)": 300,
+        "Medium (500px)": 500,
+        "Large (700px)": 700,
+        "Extra Large (1000px)": 1000
+    }
+    log_height = height_map.get(height_option, 500)
+
+    # Artist filter display
+    if artist_filter:
+        st.info(f"📋 Showing logs for: **{artist_filter}**")
 
     # Stats display
     if logger.stats['total'] > 0:
@@ -324,7 +379,7 @@ def render_enhanced_log_display(logger: EnhancedLogger, container_key: str):
             st.metric("Warnings", logger.stats['warning'])
 
     # Log display
-    filtered_entries = logger.get_filtered_entries(search_term, filters)
+    filtered_entries = logger.get_filtered_entries(search_term, filters, artist=artist_filter)
 
     if filtered_entries:
         # Show recent entries first
@@ -334,9 +389,17 @@ def render_enhanced_log_display(logger: EnhancedLogger, container_key: str):
         with log_container:
             st.markdown("**📋 Live Log Feed**")
 
-            # Create scrollable log display
-            log_html = ""
-            for entry in reversed(recent_entries):  # Most recent first
+            # Create scrollable log display with custom CSS
+            log_html = f"""
+            <div style="max-height: {log_height}px; overflow-y: auto; padding: 8px;
+                        font-family: monospace; background-color: #f8f9fa; border-radius: 4px;
+                        {'scroll-behavior: smooth;' if auto_scroll else ''}">
+            """
+
+            # Determine order based on auto-scroll
+            entries_to_show = reversed(recent_entries) if not auto_scroll else recent_entries
+
+            for entry in entries_to_show:
                 timestamp = entry['timestamp']
                 level = entry['level']
                 message = entry['message']
@@ -350,8 +413,21 @@ def render_enhanced_log_display(logger: EnhancedLogger, container_key: str):
                 <div style="margin: 2px 0; padding: 4px 8px; border-left: 3px solid {color};
                            background-color: rgba({int(color[1:3], 16)}, {int(color[3:5], 16)}, {int(color[5:7], 16)}, 0.1);">
                     <span style="font-weight: bold; color: {color};">[{timestamp}] {level}:</span>
-                    <span style="font-family: monospace; color: #333;">{message}</span>
+                    <span style="color: #333;">{message}</span>
                 </div>
+                """
+
+            log_html += "</div>"
+
+            # Add JavaScript for auto-scroll if enabled
+            if auto_scroll:
+                log_html += """
+                <script>
+                var logDiv = document.querySelector('div[style*="max-height"]');
+                if (logDiv) {
+                    logDiv.scrollTop = logDiv.scrollHeight;
+                }
+                </script>
                 """
 
             st.markdown(log_html, unsafe_allow_html=True)

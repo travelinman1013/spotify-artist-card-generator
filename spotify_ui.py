@@ -20,6 +20,7 @@ import queue
 import re
 import tempfile
 from typing import Optional, List, Dict, Any
+import pandas as pd
 from enhanced_logging import (
     EnhancedLogger, ProcessManager, cleanup_old_logs,
     render_enhanced_log_display, render_process_control_panel,
@@ -63,6 +64,10 @@ if 'perplexity_api_key' not in st.session_state:
     st.session_state.perplexity_api_key = ""
 if 'enhancement_stats' not in st.session_state:
     st.session_state.enhancement_stats = {}
+if 'artist_progress_data' not in st.session_state:
+    st.session_state.artist_progress_data = {}  # {artist_name: {...}}
+if 'selected_artist_for_logs' not in st.session_state:
+    st.session_state.selected_artist_for_logs = None
 # Enhanced process control session state
 if 'active_processes' not in st.session_state:
     st.session_state.active_processes = {}
@@ -110,6 +115,54 @@ def cleanup_temp_file(file_path):
             os.unlink(file_path)
         except Exception:
             pass  # Ignore cleanup errors
+
+def parse_json_progress(line: str) -> Optional[Dict[str, Any]]:
+    """
+    Parse JSON progress output from enhance_biographies_perplexity.py.
+
+    Args:
+        line: Output line that might contain JSON progress
+
+    Returns:
+        Progress data dict or None if not JSON
+    """
+    try:
+        # Try to parse as JSON
+        data = json.loads(line.strip())
+        if isinstance(data, dict) and data.get('type') == 'progress':
+            return data
+    except (json.JSONDecodeError, ValueError):
+        pass
+    return None
+
+def update_artist_progress(progress_data: Dict[str, Any]) -> None:
+    """
+    Update artist progress data in session state.
+
+    Args:
+        progress_data: Progress data from JSON output
+    """
+    artist_name = progress_data.get('artist', 'Unknown')
+
+    if artist_name not in st.session_state.artist_progress_data:
+        st.session_state.artist_progress_data[artist_name] = {
+            'artist': artist_name,
+            'status': 'started',
+            'percent': 0.0,
+            'connections': 0,
+            'time_elapsed': 0.0,
+            'result': '',
+            'start_time': datetime.now()
+        }
+
+    # Update with new data
+    st.session_state.artist_progress_data[artist_name].update({
+        'status': progress_data.get('status', 'unknown'),
+        'percent': progress_data.get('percent', 0.0),
+        'connections': progress_data.get('connections', 0),
+        'time_elapsed': progress_data.get('time_elapsed', 0.0),
+        'result': progress_data.get('result', '')
+    })
 # find_archive_files function removed - no longer needed with file uploader
 def validate_selected_file(file_path):
     """Validate that the selected file exists and is readable."""
@@ -157,6 +210,140 @@ def run_command_with_progress(command, progress_callback=None, log_callback=None
                         current, total = int(match.group(1)), int(match.group(2))
                         progress = current / total
                         progress_callback(progress)
+    process.wait()
+    return process.returncode, output_lines
+
+def run_enhancement_with_progress_table(command):
+    """
+    Run enhancement command with JSON progress parsing and table updates.
+
+    Args:
+        command: Shell command to run
+
+    Returns:
+        Tuple of (returncode, output_lines)
+    """
+    import pandas as pd
+
+    # Enable JSON progress mode
+    env = os.environ.copy()
+    env['ENABLE_JSON_PROGRESS'] = 'true'
+
+    process = subprocess.Popen(
+        command,
+        shell=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+        universal_newlines=True,
+        env=env
+    )
+
+    # Create placeholders for table and logs
+    table_placeholder = st.empty()
+    progress_placeholder = st.empty()
+    log_placeholder = st.empty()
+
+    output_lines = []
+    error_lines = []
+
+    # Read stdout and stderr concurrently
+    import threading
+    import queue
+
+    stdout_queue = queue.Queue()
+    stderr_queue = queue.Queue()
+
+    def read_stdout():
+        for line in iter(process.stdout.readline, ''):
+            if line:
+                stdout_queue.put(line)
+        stdout_queue.put(None)  # Signal end
+
+    def read_stderr():
+        for line in iter(process.stderr.readline, ''):
+            if line:
+                stderr_queue.put(line)
+        stderr_queue.put(None)  # Signal end
+
+    # Start reader threads
+    stdout_thread = threading.Thread(target=read_stdout, daemon=True)
+    stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+    stdout_thread.start()
+    stderr_thread.start()
+
+    # Process output
+    stdout_done = False
+    stderr_done = False
+
+    while not (stdout_done and stderr_done):
+        # Check stdout for JSON progress
+        try:
+            line = stdout_queue.get(timeout=0.1)
+            if line is None:
+                stdout_done = True
+            else:
+                line = line.strip()
+                output_lines.append(line)
+
+                # Try to parse as JSON progress
+                progress_data = parse_json_progress(line)
+                if progress_data:
+                    update_artist_progress(progress_data)
+
+                    # Update progress table
+                    if st.session_state.artist_progress_data:
+                        df_data = []
+                        for artist, data in st.session_state.artist_progress_data.items():
+                            df_data.append({
+                                'Artist': artist,
+                                'Status': data['status'],
+                                'Progress': f"{data['percent']:.0%}",
+                                'Connections': data['connections'],
+                                'Time (s)': f"{data['time_elapsed']:.1f}",
+                                'Result': data['result']
+                            })
+
+                        df = pd.DataFrame(df_data)
+                        table_placeholder.dataframe(
+                            df,
+                            use_container_width=True,
+                            hide_index=True
+                        )
+
+                        # Update overall progress
+                        total_processed = progress_data.get('total_processed', 0)
+                        total_files = progress_data.get('total_files', 1)
+                        overall_progress = total_processed / total_files if total_files > 0 else 0
+                        progress_placeholder.progress(
+                            overall_progress,
+                            text=f"Processing: {total_processed}/{total_files} artists"
+                        )
+        except queue.Empty:
+            pass
+
+        # Check stderr for human-readable logs
+        try:
+            line = stderr_queue.get(timeout=0.1)
+            if line is None:
+                stderr_done = True
+            else:
+                line = line.strip()
+                error_lines.append(line)
+                st.session_state.enhancement_log_output.append(line)
+
+                # Show last 20 lines of logs
+                log_placeholder.text_area(
+                    "Recent Logs",
+                    "\n".join(st.session_state.enhancement_log_output[-20:]),
+                    height=200
+                )
+        except queue.Empty:
+            pass
+
+        time.sleep(0.1)
+
     process.wait()
     return process.returncode, output_lines
 def main():
@@ -539,70 +726,81 @@ def main():
                         st.session_state.enhancement_running = True
                         st.session_state.enhancement_log_output = []
                         st.session_state.enhancement_stats = {}
-                        # Run command
-                        with st.spinner("Enhancing biographies..."):
-                            progress_bar = st.progress(0)
-                            log_area = st.empty()
-                            def update_progress(value):
-                                st.session_state.enhancement_progress = value
-                                progress_bar.progress(value)
-                            def update_log(line):
-                                st.session_state.enhancement_log_output.append(line)
-                                # Show last 30 lines for enhancement (detailed output)
-                                log_area.text_area(
-                                    "Real-time Log Output",
-"\n".join(st.session_state.enhancement_log_output[-30:]),
-                                    height=400,
-                                    key=f"enhancement_log_{len(st.session_state.enhancement_log_output)}"
-                                )
-                            returncode, output = run_command_with_progress(
-                                cmd, update_progress, update_log
+                        st.session_state.artist_progress_data = {}  # Reset progress data
+
+                        # Run command with progress table
+                        st.markdown("### 📊 Artist Progress")
+                        returncode, output = run_enhancement_with_progress_table(cmd)
+                        st.session_state.enhancement_running = False
+
+                        # Export progress table button
+                        if st.session_state.artist_progress_data:
+                            df_data = []
+                            for artist, data in st.session_state.artist_progress_data.items():
+                                df_data.append({
+                                    'Artist': artist,
+                                    'Status': data['status'],
+                                    'Progress': f"{data['percent']:.0%}",
+                                    'Connections': data['connections'],
+                                    'Time (s)': f"{data['time_elapsed']:.1f}",
+                                    'Result': data['result']
+                                })
+                            df = pd.DataFrame(df_data)
+                            csv_data = df.to_csv(index=False)
+                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+                            st.download_button(
+                                label="📥 Export Progress Table to CSV",
+                                data=csv_data,
+                                file_name=f"enhancement_progress_{timestamp}.csv",
+                                mime="text/csv",
+                                use_container_width=True
                             )
-                            st.session_state.enhancement_running = False
-                            if returncode == 0:
-                                st.success("✅ Biography enhancement completed successfully!")
-                                # Parse and display summary statistics
-                                summary_stats = {}
-                                for line in output:
-                                    # Enhanced count
-                                    if "✅ Enhanced:" in line:
-                                        match = re.search(r'Enhanced: (\d+)', line)
-                                        if match:
-                                            summary_stats['enhanced'] = int(match.group(1))
-                                    # Problems detected
-                                    elif "🔍 Problems detected:" in line:
-                                        match = re.search(r'Problems detected: (\d+)', line)
-                                        if match:
-                                            summary_stats['problems_detected'] = int(match.group(1))
-                                    # Recovered count
-                                    elif "✅ Recovered:" in line:
-                                        match = re.search(r'Recovered: (\d+)', line)
-                                        if match:
-                                            summary_stats['recovered'] = int(match.group(1))
-                                    # Quarantined count
-                                    elif "⚠️ Quarantined:" in line:
-                                        match = re.search(r'Quarantined: (\d+)', line)
-                                        if match:
-                                            summary_stats['quarantined'] = int(match.group(1))
-                                    # Connections found
-                                    elif "🔗 Connections found:" in line:
-                                        match = re.search(r'Connections found: (\d+)', line)
-                                        if match:
-                                            summary_stats['connections'] = int(match.group(1))
-                                    # Network nodes
-                                    elif "📚 Network nodes:" in line:
-                                        match = re.search(r'Network nodes: (\d+)', line)
-                                        if match:
-                                            summary_stats['network_nodes'] = int(match.group(1))
-                                    # Success rate
-                                    elif "🎯 Success rate:" in line:
-                                        match = re.search(r'Success rate: ([\d.]+)%', line)
-                                        if match:
-                                            summary_stats['success_rate'] = float(match.group(1))
-                                # Store stats for display
-                                st.session_state.enhancement_stats = summary_stats
-                            else:
-                                st.error(f"❌ Enhancement failed with error code {returncode}")
+
+                        if returncode == 0:
+                            st.success("✅ Biography enhancement completed successfully!")
+                            # Parse and display summary statistics
+                            summary_stats = {}
+                            for line in output:
+                                # Enhanced count
+                                if "✅ Enhanced:" in line:
+                                    match = re.search(r'Enhanced: (\d+)', line)
+                                    if match:
+                                        summary_stats['enhanced'] = int(match.group(1))
+                                # Problems detected
+                                elif "🔍 Problems detected:" in line:
+                                    match = re.search(r'Problems detected: (\d+)', line)
+                                    if match:
+                                        summary_stats['problems_detected'] = int(match.group(1))
+                                # Recovered count
+                                elif "✅ Recovered:" in line:
+                                    match = re.search(r'Recovered: (\d+)', line)
+                                    if match:
+                                        summary_stats['recovered'] = int(match.group(1))
+                                # Quarantined count
+                                elif "⚠️ Quarantined:" in line:
+                                    match = re.search(r'Quarantined: (\d+)', line)
+                                    if match:
+                                        summary_stats['quarantined'] = int(match.group(1))
+                                # Connections found
+                                elif "🔗 Connections found:" in line:
+                                    match = re.search(r'Connections found: (\d+)', line)
+                                    if match:
+                                        summary_stats['connections'] = int(match.group(1))
+                                # Network nodes
+                                elif "📚 Network nodes:" in line:
+                                    match = re.search(r'Network nodes: (\d+)', line)
+                                    if match:
+                                        summary_stats['network_nodes'] = int(match.group(1))
+                                # Success rate
+                                elif "🎯 Success rate:" in line:
+                                    match = re.search(r'Success rate: ([\d.]+)%', line)
+                                    if match:
+                                        summary_stats['success_rate'] = float(match.group(1))
+                            # Store stats for display
+                            st.session_state.enhancement_stats = summary_stats
+                        else:
+                            st.error(f"❌ Enhancement failed with error code {returncode}")
                     else:
                         st.error("Prerequisites not met. Please check the requirements above.")
             with col_btn2:
