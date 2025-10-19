@@ -39,10 +39,14 @@ TEMP_LOG_DIR.mkdir(exist_ok=True)
 # Initialize session state
 if 'running' not in st.session_state:
     st.session_state.running = False
+if 'running_generator' not in st.session_state:
+    st.session_state.running_generator = False
 if 'progress' not in st.session_state:
     st.session_state.progress = 0
 if 'log_output' not in st.session_state:
     st.session_state.log_output = []
+if 'log_output_generator' not in st.session_state:
+    st.session_state.log_output_generator = []
 if 'config' not in st.session_state:
     st.session_state.config = {}
 if 'uploaded_file_downloader' not in st.session_state:
@@ -363,10 +367,309 @@ def main():
     # Load configuration
     if not st.session_state.config:
         st.session_state.config = load_config()
+
+    # Global process status indicator
+    active_processes = []
+    if st.session_state.get('discovery_running', False):
+        active_processes.append("🔍 Artist Discovery")
+    if st.session_state.get('running', False):
+        active_processes.append("🖼️ Image Downloader")
+    if st.session_state.get('running_generator', False):
+        active_processes.append("📇 Artist Card Generator")
+    if st.session_state.get('enhancement_running', False):
+        active_processes.append("🧠 Biography Enhancement")
+
+    if active_processes:
+        st.info(f"🔄 Active processes: {', '.join(active_processes)}")
+
     # Create tabs
-    tab1, tab2, tab3, tab4 = st.tabs(["🖼️ Image Downloader", "📇 Artist Card Generator", "🧠 Biography Enhancement", "⚙️ Settings"])
-    # Image Downloader Tab
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔍 Artist Discovery", "🖼️ Image Downloader", "📇 Artist Card Generator", "🧠 Biography Enhancement", "⚙️ Settings"])
+
+    # Artist Discovery Pipeline Tab
     with tab1:
+        st.header("🔍 Artist Discovery Pipeline")
+        st.markdown("Unified workflow: Parse archive → Check vault → Spotify + Perplexity → Download image + Create card")
+
+        # Information box
+        with st.expander("ℹ️ About This Pipeline", expanded=False):
+            st.markdown("""
+            **Consolidated Workflow:**
+
+            This tab combines three separate scripts into one streamlined process:
+
+            1. **Parse Archive**: Extract artist names from WWOZ markdown files
+            2. **Check Existence**: Verify if artist card exists in your Obsidian vault
+            3. **Gather Data**:
+               - Spotify: Genres, popularity, followers, image URL
+               - Perplexity AI: Biography, musical connections, fun facts
+            4. **Create/Update**: Download image + Build artist card
+            5. **Network**: Maintain artist_connections.json graph
+
+            **Smart Behavior:**
+            - Skips artists with complete Perplexity-enhanced cards
+            - Updates existing cards missing Perplexity data
+            - Atomic operations: All-or-nothing per artist
+            - Rate limiting: Respects API limits automatically
+            """)
+
+        # Initialize session state for discovery pipeline
+        if 'discovery_running' not in st.session_state:
+            st.session_state.discovery_running = False
+        if 'discovery_log_output' not in st.session_state:
+            st.session_state.discovery_log_output = []
+        if 'discovery_stats' not in st.session_state:
+            st.session_state.discovery_stats = {}
+
+        col1, col2 = st.columns([2, 1])
+
+        with col1:
+            st.subheader("Input & Configuration")
+
+            # File uploader
+            uploaded_archive = st.file_uploader(
+                "Upload WWOZ Archive:",
+                type=['md'],
+                key="discovery_archive_uploader",
+                help="Upload a markdown file containing WWOZ daily archive data"
+            )
+
+            # Handle uploaded file
+            if uploaded_archive is not None:
+                if 'discovery_temp_file' not in st.session_state or st.session_state.get('discovery_uploaded_file') != uploaded_archive:
+                    # New file uploaded, save to temp location
+                    if st.session_state.get('discovery_temp_file'):
+                        cleanup_temp_file(st.session_state.discovery_temp_file)
+                    st.session_state.discovery_temp_file = save_uploaded_file(uploaded_archive, "discovery")
+                    st.session_state.discovery_uploaded_file = uploaded_archive
+
+                archive_path = st.session_state.discovery_temp_file
+                st.success(f"✅ Archive uploaded: {uploaded_archive.name}")
+            else:
+                archive_path = None
+
+            st.markdown("**Vault Paths** (configured from user requirements)")
+
+            # Display vault paths (hardcoded as requested)
+            cards_dir_display = st.text_input(
+                "Artist cards directory:",
+                value="/Users/maxwell/LETSGO/MaxVault/01_Projects/PersonalArtistWiki/Artists",
+                key="discovery_cards_dir",
+                disabled=True,
+                help="Artist markdown files location"
+            )
+
+            images_dir_display = st.text_input(
+                "Artist images directory:",
+                value="/Users/maxwell/LETSGO/MaxVault/03_Resources/source_material/ArtistPortraits",
+                key="discovery_images_dir",
+                disabled=True,
+                help="Artist portrait images location"
+            )
+
+            st.markdown("**Options:**")
+            col_opt1, col_opt2 = st.columns(2)
+
+            with col_opt1:
+                dry_run = st.checkbox(
+                    "☐ Dry run (preview only)",
+                    value=False,
+                    key="discovery_dry_run",
+                    help="Preview changes without creating/modifying files"
+                )
+
+            with col_opt2:
+                force_process = st.checkbox(
+                    "☐ Force re-process",
+                    value=False,
+                    key="discovery_force",
+                    help="Re-process artists with existing Perplexity-enhanced cards"
+                )
+
+        with col2:
+            st.subheader("Prerequisites")
+
+            # Check API key
+            perplexity_key = st.session_state.get('perplexity_api_key') or os.getenv('PERPLEXITY_API_KEY')
+
+            if perplexity_key:
+                st.success("✅ Perplexity API Key")
+            else:
+                st.error("❌ Perplexity API Key required")
+                st.markdown("Configure in Settings tab or:")
+                st.code("export PERPLEXITY_API_KEY='key'")
+
+            # Check archive
+            if archive_path:
+                st.success("✅ Archive file uploaded")
+            else:
+                st.warning("⚠️ No archive uploaded")
+
+            # Check directories
+            if os.path.exists(cards_dir_display):
+                st.success("✅ Cards directory exists")
+            else:
+                st.error("❌ Cards directory not found")
+
+            if os.path.exists(images_dir_display):
+                st.success("✅ Images directory exists")
+            else:
+                st.error("❌ Images directory not found")
+
+            st.markdown("---")
+            st.subheader("Actions")
+
+            can_run = bool(perplexity_key and archive_path and os.path.exists(cards_dir_display))
+
+            if st.button(
+                "🚀 Start Discovery",
+                type="primary",
+                key="run_discovery",
+                disabled=st.session_state.discovery_running or not can_run,
+                use_container_width=True
+            ):
+                if can_run:
+                    # Set environment variable
+                    os.environ['PERPLEXITY_API_KEY'] = perplexity_key
+
+                    # Build command
+                    cmd = f"source venv/bin/activate && python artist_discovery_pipeline.py"
+                    cmd += f' --archive "{archive_path}"'
+                    cmd += f' --cards-dir "{cards_dir_display}"'
+                    cmd += f' --images-dir "{images_dir_display}"'
+
+                    if dry_run:
+                        cmd += " --dry-run"
+                    if force_process:
+                        cmd += " --force"
+
+                    st.session_state.discovery_running = True
+                    st.session_state.discovery_log_output = []
+                    st.session_state.discovery_stats = {}
+
+                    # Run command
+                    st.markdown("### 📊 Processing Progress")
+
+                    progress_placeholder = st.empty()
+                    log_placeholder = st.empty()
+
+                    with st.spinner("Discovering and processing artists..."):
+                        process = subprocess.Popen(
+                            cmd,
+                            shell=True,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            text=True,
+                            bufsize=1,
+                            universal_newlines=True
+                        )
+
+                        output_lines = []
+                        for line in iter(process.stdout.readline, ''):
+                            if line:
+                                line = line.strip()
+                                output_lines.append(line)
+                                st.session_state.discovery_log_output.append(line)
+
+                                # Update log display
+                                log_placeholder.text_area(
+                                    "Recent Logs",
+                                    "\n".join(st.session_state.discovery_log_output[-20:]),
+                                    height=300
+                                )
+
+                                # Try to extract progress
+                                if "Processing:" in line or "artist" in line.lower():
+                                    match = re.search(r'(\d+)/(\d+)', line)
+                                    if match:
+                                        current, total = int(match.group(1)), int(match.group(2))
+                                        progress = current / total
+                                        progress_placeholder.progress(
+                                            progress,
+                                            text=f"Processing: {current}/{total} artists"
+                                        )
+
+                        process.wait()
+                        st.session_state.discovery_running = False
+                        returncode = process.returncode
+
+                    if returncode == 0:
+                        st.success("✅ Artist discovery pipeline completed successfully!")
+
+                        # Parse summary statistics
+                        summary_stats = {}
+                        for line in output_lines:
+                            if "✨ Created:" in line:
+                                match = re.search(r'Created: (\d+)', line)
+                                if match:
+                                    summary_stats['created'] = int(match.group(1))
+                            elif "✅ Enhanced:" in line:
+                                match = re.search(r'Enhanced: (\d+)', line)
+                                if match:
+                                    summary_stats['enhanced'] = int(match.group(1))
+                            elif "🔗 Connections found:" in line:
+                                match = re.search(r'Connections found: (\d+)', line)
+                                if match:
+                                    summary_stats['connections'] = int(match.group(1))
+                            elif "📚 Network size:" in line:
+                                match = re.search(r'Network size: (\d+)', line)
+                                if match:
+                                    summary_stats['network_size'] = int(match.group(1))
+                            elif "❌ Errors:" in line:
+                                match = re.search(r'Errors: (\d+)', line)
+                                if match:
+                                    summary_stats['errors'] = int(match.group(1))
+                            elif "🎯 Success rate:" in line:
+                                match = re.search(r'Success rate: ([\d.]+)%', line)
+                                if match:
+                                    summary_stats['success_rate'] = float(match.group(1))
+
+                        st.session_state.discovery_stats = summary_stats
+                    else:
+                        st.error(f"❌ Pipeline failed with error code {returncode}")
+                else:
+                    st.error("Prerequisites not met. Please check requirements above.")
+
+        # Statistics display
+        if st.session_state.discovery_stats:
+            st.markdown("---")
+            st.subheader("📊 Summary Statistics")
+            stats = st.session_state.discovery_stats
+
+            col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+
+            with col_m1:
+                if 'created' in stats:
+                    st.metric("✨ Cards Created", stats['created'])
+                if 'enhanced' in stats:
+                    st.metric("✅ Cards Enhanced", stats['enhanced'])
+
+            with col_m2:
+                if 'connections' in stats:
+                    st.metric("🔗 Connections", stats['connections'])
+                if 'network_size' in stats:
+                    st.metric("📚 Network Size", stats['network_size'])
+
+            with col_m3:
+                if 'errors' in stats:
+                    st.metric("❌ Errors", stats['errors'])
+
+            with col_m4:
+                if 'success_rate' in stats:
+                    st.metric("🎯 Success Rate", f"{stats['success_rate']:.1f}%")
+
+        # Download logs button
+        if st.session_state.discovery_log_output:
+            log_content = "\n".join(st.session_state.discovery_log_output)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            st.download_button(
+                label="📥 Download Log",
+                data=log_content,
+                file_name=f"artist_discovery_{timestamp}.txt",
+                mime="text/plain"
+            )
+
+    # Image Downloader Tab
+    with tab2:
         st.header("Download Artist Images from Spotify")
         col1, col2 = st.columns([2, 1])
         with col1:
@@ -419,7 +722,7 @@ def main():
                     is_valid, validation_message = validate_selected_file(input_file)
                     if not is_valid:
                         st.error(f"❌ Invalid input file: {validation_message}")
-                        return
+                        st.stop()
                     # Update recent files only if it's a path-based file (not uploaded)
                     if input_file not in recent_files and not uploaded_file:
                         recent_files.insert(0, input_file)
@@ -434,41 +737,86 @@ def main():
                         cmd += " --skip-existing"
                     st.session_state.running = True
                     st.session_state.log_output = []
-                    # Run command
-                    with st.spinner("Downloading images..."):
-                        progress_bar = st.progress(0)
-                        log_area = st.empty()
-                        def update_progress(value):
-                            progress_bar.progress(value)
-                        def update_log(line):
-                            st.session_state.log_output.append(line)
-                            # Show last 10 lines
-                            log_area.text_area("Log Output",
-"\n".join(st.session_state.log_output[-10:]),
-                                             height=200)
-                        returncode, output = run_command_with_progress(
-                            cmd, update_progress, update_log
-                        )
-                        st.session_state.running = False
-                        if returncode == 0:
-                            st.success("✅ Download completed successfully!")
-                            # Parse summary from output
-                            for line in reversed(output):
-                                if "Total artists:" in line:
-                                    st.info(line)
-                                elif "Successfully downloaded:" in line:
-                                    st.info(line)
-                                elif "Failed:" in line:
-                                    st.warning(line)
-                                elif "Skipped" in line:
-                                    st.info(line)
-                        else:
-                            st.error(f"❌ Download failed with error code {returncode}")
+                    st.session_state.downloader_result = None
                 else:
                     st.error("Please provide both input file and output directory")
-            # Progress display
+                    st.stop()
+
+        # Persistent progress display (always shown when process is running or has completed)
+        if st.session_state.running or st.session_state.log_output:
+            st.markdown("---")
+            st.subheader("📊 Progress")
+
+            # Progress bar placeholder
+            progress_placeholder = st.empty()
+
+            # Log output area
+            log_placeholder = st.empty()
+
             if st.session_state.running:
-                st.info("🔄 Process running...")
+                # Build command from current values
+                cmd = f"source venv/bin/activate && python spotify_image_downloader.py"
+                cmd += f' --input "{input_file}"'
+                cmd += f' --output "{output_dir}"'
+                if skip_existing:
+                    cmd += " --skip-existing"
+
+                # Run command with progress updates
+                with st.spinner("Downloading images..."):
+                    def update_progress(value):
+                        progress_placeholder.progress(value, text=f"Progress: {value:.0%}")
+
+                    def update_log(line):
+                        st.session_state.log_output.append(line)
+                        # Show last 15 lines
+                        log_placeholder.text_area(
+                            "Log Output",
+                            "\n".join(st.session_state.log_output[-15:]),
+                            height=300,
+                            key=f"log_downloader_{len(st.session_state.log_output)}"
+                        )
+
+                    returncode, output = run_command_with_progress(
+                        cmd, update_progress, update_log
+                    )
+                    st.session_state.running = False
+                    st.session_state.downloader_result = returncode
+
+                    if returncode == 0:
+                        st.success("✅ Download completed successfully!")
+                        # Parse summary from output
+                        for line in reversed(output):
+                            if "Total artists:" in line:
+                                st.info(line)
+                            elif "Successfully downloaded:" in line:
+                                st.info(line)
+                            elif "Failed:" in line:
+                                st.warning(line)
+                            elif "Skipped" in line:
+                                st.info(line)
+                    else:
+                        st.error(f"❌ Download failed with error code {returncode}")
+            else:
+                # Show completed logs
+                if st.session_state.log_output:
+                    st.text_area(
+                        "Log Output (Completed)",
+                        "\n".join(st.session_state.log_output[-15:]),
+                        height=300,
+                        key="log_downloader_completed"
+                    )
+
+                    # Show result status
+                    if st.session_state.get('downloader_result') == 0:
+                        st.success("✅ Last run completed successfully")
+                    elif st.session_state.get('downloader_result') is not None:
+                        st.error(f"❌ Last run failed with error code {st.session_state.downloader_result}")
+
+                    # Clear logs button
+                    if st.button("🗑️ Clear Logs", key="clear_downloader_logs"):
+                        st.session_state.log_output = []
+                        st.session_state.downloader_result = None
+                        st.rerun()
     # Artist Card Generator Tab
     with tab2:
         st.header("Generate Artist Cards with Metadata")
@@ -539,14 +887,14 @@ def main():
             )
             # Run button
             if st.button("▶️ Generate Cards", type="primary", key="run_generator",
-                        disabled=st.session_state.running):
+                        disabled=st.session_state.running_generator):
                 if (artist_name or input_file_gen) and cards_output_dir:
                     # Validate the input file if using file mode
                     if input_file_gen and not artist_name:
                         is_valid, validation_message = validate_selected_file(input_file_gen)
                         if not is_valid:
                             st.error(f"❌ Invalid input file: {validation_message}")
-                            return
+                            st.stop()
                     # Update recent files only if it's a path-based file (not uploaded)
                     if input_file_gen and not artist_name and not uploaded_file_gen:
                         recent_files = st.session_state.config.get('recent_files', [])
@@ -565,45 +913,94 @@ def main():
                     if images_output_dir:
                         cmd += f' --images-dir "{images_output_dir}"'
                     cmd += f' --log-level {log_level}'
-                    st.session_state.running = True
-                    st.session_state.log_output = []
-                    # Run command
-                    with st.spinner("Generating artist cards..."):
-                        progress_bar = st.progress(0)
-                        log_area = st.empty()
-                        def update_progress(value):
-                            progress_bar.progress(value)
-                        def update_log(line):
-                            st.session_state.log_output.append(line)
-                            # Show last 15 lines for generator (more detailed output)
-                            log_area.text_area("Log Output",
-"\n".join(st.session_state.log_output[-15:]),
-                                             height=300)
-                        returncode, output = run_command_with_progress(
-                            cmd, update_progress, update_log
-                        )
-                        st.session_state.running = False
-                        if returncode == 0:
-                            st.success("✅ Card generation completed successfully!")
-                            # Show summary
-                            if artist_name:
-                                st.info(f"Generated card for: {artist_name}")
-                            else:
-                                # Parse summary from output
-                                for line in reversed(output):
-                                    if "Total artists:" in line:
-                                        st.info(line)
-                                    elif "Successfully generated:" in line:
-                                        st.info(line)
-                                    elif "Failed:" in line:
-                                        st.warning(line)
-                        else:
-                            st.error(f"❌ Generation failed with error code {returncode}")
+                    st.session_state.running_generator = True
+                    st.session_state.log_output_generator = []
+                    st.session_state.generator_result = None
                 else:
                     st.error("Please provide input (artist name or file) and output directory")
-            # Progress display
-            if st.session_state.running:
-                st.info("🔄 Process running...")
+                    st.stop()
+
+        # Persistent progress display (always shown when process is running or has completed)
+        if st.session_state.running_generator or st.session_state.log_output_generator:
+            st.markdown("---")
+            st.subheader("📊 Progress")
+
+            # Progress bar placeholder
+            progress_placeholder = st.empty()
+
+            # Log output area
+            log_placeholder = st.empty()
+
+            if st.session_state.running_generator:
+                # Build command from current values
+                cmd = f"source venv/bin/activate && python spotify_artist_card_generator.py"
+                if artist_name:
+                    cmd += f' --artist "{artist_name}"'
+                else:
+                    cmd += f' --input-file "{input_file_gen}"'
+                cmd += f' --output-dir "{cards_output_dir}"'
+                if images_output_dir:
+                    cmd += f' --images-dir "{images_output_dir}"'
+                cmd += f' --log-level {log_level}'
+
+                # Run command with progress updates
+                with st.spinner("Generating artist cards..."):
+                    def update_progress(value):
+                        progress_placeholder.progress(value, text=f"Progress: {value:.0%}")
+
+                    def update_log(line):
+                        st.session_state.log_output_generator.append(line)
+                        # Show last 15 lines
+                        log_placeholder.text_area(
+                            "Log Output",
+                            "\n".join(st.session_state.log_output_generator[-15:]),
+                            height=300,
+                            key=f"log_generator_{len(st.session_state.log_output_generator)}"
+                        )
+
+                    returncode, output = run_command_with_progress(
+                        cmd, update_progress, update_log
+                    )
+                    st.session_state.running_generator = False
+                    st.session_state.generator_result = returncode
+
+                    if returncode == 0:
+                        st.success("✅ Card generation completed successfully!")
+                        # Show summary
+                        if artist_name:
+                            st.info(f"Generated card for: {artist_name}")
+                        else:
+                            # Parse summary from output
+                            for line in reversed(output):
+                                if "Total artists:" in line:
+                                    st.info(line)
+                                elif "Successfully generated:" in line:
+                                    st.info(line)
+                                elif "Failed:" in line:
+                                    st.warning(line)
+                    else:
+                        st.error(f"❌ Generation failed with error code {returncode}")
+            else:
+                # Show completed logs
+                if st.session_state.log_output_generator:
+                    st.text_area(
+                        "Log Output (Completed)",
+                        "\n".join(st.session_state.log_output_generator[-15:]),
+                        height=300,
+                        key="log_generator_completed"
+                    )
+
+                    # Show result status
+                    if st.session_state.get('generator_result') == 0:
+                        st.success("✅ Last run completed successfully")
+                    elif st.session_state.get('generator_result') is not None:
+                        st.error(f"❌ Last run failed with error code {st.session_state.generator_result}")
+
+                    # Clear logs button
+                    if st.button("🗑️ Clear Logs", key="clear_generator_logs"):
+                        st.session_state.log_output_generator = []
+                        st.session_state.generator_result = None
+                        st.rerun()
     # Biography Enhancement Tab
     with tab3:
         st.header("📚 Biography Enhancement with Perplexity AI")
