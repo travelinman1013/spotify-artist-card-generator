@@ -631,7 +631,9 @@ Only include verified information from credible sources."""
                         if period:
                             detail_parts.append(f"[{period}]")
 
-                        content += f"- [[{name}]] - {' '.join(detail_parts)}\n"
+                        # Use proper Obsidian wikilink format: [[Filename|Display Name]]
+                        sanitized_name = self.sanitize_filename(name)
+                        content += f"- [[{sanitized_name}|{name}]] - {' '.join(detail_parts)}\n"
 
             if connections.get('collaborators'):
                 content += "\n### Key Collaborators\n"
@@ -648,7 +650,9 @@ Only include verified information from credible sources."""
                         if period:
                             detail_parts.append(f"[{period}]")
 
-                        content += f"- [[{name}]] - {' '.join(detail_parts)}\n"
+                        # Use proper Obsidian wikilink format: [[Filename|Display Name]]
+                        sanitized_name = self.sanitize_filename(name)
+                        content += f"- [[{sanitized_name}|{name}]] - {' '.join(detail_parts)}\n"
 
             if connections.get('influenced'):
                 content += "\n### Artists Influenced\n"
@@ -665,7 +669,9 @@ Only include verified information from credible sources."""
                         if period:
                             detail_parts.append(f"[{period}]")
 
-                        content += f"- [[{name}]] - {' '.join(detail_parts)}\n"
+                        # Use proper Obsidian wikilink format: [[Filename|Display Name]]
+                        sanitized_name = self.sanitize_filename(name)
+                        content += f"- [[{sanitized_name}|{name}]] - {' '.join(detail_parts)}\n"
 
         # Add external links
         content += "\n## External Links\n"
