@@ -40,6 +40,7 @@ from urllib.parse import quote
 import yaml
 from openai import OpenAI
 from tqdm import tqdm
+import musicbrainzngs
 
 # Configuration
 SPOTIFY_CLIENT_ID = "a088edf333334899b6ad55579b834389"
@@ -61,7 +62,14 @@ CONNECTIONS_FILE = "artist_connections.json"
 # Rate limiting
 SPOTIFY_RATE_LIMIT = 0.6  # seconds
 PERPLEXITY_RATE_LIMIT = 2.0  # seconds
+MUSICBRAINZ_RATE_LIMIT = 1.0  # seconds (required: 1 request/second)
 REQUEST_TIMEOUT = 30
+
+# MusicBrainz Configuration
+MUSICBRAINZ_APP_NAME = "WWOZ-Artist-Discovery-Pipeline"
+MUSICBRAINZ_APP_VERSION = "1.0"
+MUSICBRAINZ_CONTACT = "wwoz-scraper@example.com"
+MUSICBRAINZ_MIN_CONFIDENCE = 80  # Minimum confidence (0-100) to accept a match
 
 
 class ArtistDiscoveryPipeline:
@@ -82,6 +90,9 @@ class ArtistDiscoveryPipeline:
         self.spotify_token = None
         self.spotify_token_expires_at = 0
         self.perplexity_client = None
+
+        # Initialize MusicBrainz
+        musicbrainzngs.set_useragent(MUSICBRAINZ_APP_NAME, MUSICBRAINZ_APP_VERSION, MUSICBRAINZ_CONTACT)
 
         # Load connections database
         self.connections_file = self.cards_dir / CONNECTIONS_FILE
@@ -112,6 +123,9 @@ class ArtistDiscoveryPipeline:
             ]
         )
         self.logger = logging.getLogger(__name__)
+
+        # Suppress musicbrainzngs verbose logging (uncaught attribute messages)
+        logging.getLogger('musicbrainzngs').setLevel(logging.WARNING)
 
     def _load_connections(self) -> Dict[str, Any]:
         """Load existing connections database or create new one."""
@@ -289,6 +303,371 @@ class ArtistDiscoveryPipeline:
         except Exception as e:
             self.logger.error(f"Error downloading image for {artist_name}: {e}")
             return None
+
+    # === MUSICBRAINZ API METHODS ===
+
+    def calculate_match_confidence(self, artist: Dict[str, Any], search_name: str, spotify_genres: List[str] = None) -> int:
+        """
+        Calculate confidence score (0-100) for a MusicBrainz match.
+
+        Scoring breakdown:
+        - MusicBrainz search score: 0-40 points (how well MB ranked this result)
+        - Name matching: 0-40 points (exact match = 40, partial = 20)
+        - Genre validation: 0-20 points (keyword overlap in disambiguation)
+
+        Perfect score (100) = ext:score 100 + exact name + genre match
+
+        Args:
+            artist: MusicBrainz artist dict
+            search_name: Original search query
+            spotify_genres: Optional Spotify genres for validation
+
+        Returns:
+            Confidence score (0-100)
+        """
+        confidence = 0
+
+        # 1. Base score from MusicBrainz search ranking (0-40 points)
+        # MB returns 'ext:score' in search results (0-100)
+        mb_score = int(artist.get('ext:score', 0))
+        confidence += (mb_score / 100) * 40  # Normalize to 0-40
+
+        # 2. Name matching (0-40 points)
+        artist_name = artist.get('name', '').lower().strip()
+        search_name_norm = search_name.lower().strip()
+
+        if artist_name == search_name_norm:
+            # Exact match
+            confidence += 40
+        elif artist_name in search_name_norm or search_name_norm in artist_name:
+            # Partial match (e.g., "The Band" matches "ALEX LEACH BAND")
+            confidence += 20
+        else:
+            # No direct name match - likely wrong artist
+            confidence += 0
+
+        # 3. Genre validation via disambiguation (0-20 points)
+        if spotify_genres:
+            disambiguation = artist.get('disambiguation', '').lower()
+            if disambiguation:
+                genre_keywords = set()
+                for genre in spotify_genres:
+                    genre_keywords.update(genre.lower().split())
+
+                # Count keyword matches
+                matches = sum(1 for keyword in genre_keywords if keyword in disambiguation)
+                if matches > 0:
+                    confidence += min(matches * 5, 20)  # Up to 20 points (4+ matches = max)
+
+        return min(int(confidence), 100)  # Cap at 100
+
+    def find_best_musicbrainz_match(self, artist_name: str, spotify_genres: List[str] = None,
+                                   min_confidence: int = MUSICBRAINZ_MIN_CONFIDENCE) -> Optional[Tuple[Dict[str, Any], int]]:
+        """
+        Find the best MusicBrainz match for an artist using intelligent matching with confidence scoring.
+
+        Matching strategy:
+        1. Prefer exact name matches (case-insensitive)
+        2. If multiple exact matches, use Spotify genres to validate via disambiguation
+        3. Calculate confidence score (0-100) based on name matching + genre overlap
+        4. Reject matches below min_confidence threshold
+
+        Args:
+            artist_name: Artist name to search for
+            spotify_genres: Optional list of Spotify genres for validation
+            min_confidence: Minimum confidence score (0-100) to accept a match (default: 90)
+
+        Returns:
+            Tuple of (artist_dict, confidence_score) if match found with sufficient confidence,
+            or None if no match or confidence too low
+        """
+        try:
+            # Search for top 10 candidates
+            result = musicbrainzngs.search_artists(artist=artist_name, limit=10)
+
+            if not result.get('artist-list'):
+                return None
+
+            candidates = result['artist-list']
+
+            # Phase 1: Filter for exact name matches (case-insensitive)
+            normalized_search = artist_name.lower().strip()
+            exact_matches = [
+                artist for artist in candidates
+                if artist.get('name', '').lower().strip() == normalized_search
+            ]
+
+            if exact_matches:
+                candidates = exact_matches
+                self.logger.debug(f"Found {len(exact_matches)} exact name matches for '{artist_name}'")
+
+            # Phase 2: If we have multiple candidates and Spotify genres, score by genre relevance
+            if len(candidates) > 1 and spotify_genres:
+                genre_keywords = set()
+                for genre in spotify_genres:
+                    # Extract keywords from genre strings (e.g., "east coast hip hop" -> ["east", "coast", "hip", "hop"])
+                    genre_keywords.update(genre.lower().split())
+
+                scored_candidates = []
+                for artist in candidates:
+                    score = 0
+                    disambiguation = artist.get('disambiguation', '').lower()
+                    artist_type = artist.get('type', '').lower()
+
+                    # Check for genre keyword overlap in disambiguation
+                    for keyword in genre_keywords:
+                        if keyword in disambiguation:
+                            score += 2  # Strong signal
+
+                    # Bonus for having disambiguation info (more detailed entry)
+                    if disambiguation:
+                        score += 1
+
+                    # Type-based scoring (prefer more specific types)
+                    if artist_type in ['person', 'group', 'band']:
+                        score += 1
+
+                    scored_candidates.append((score, artist))
+
+                # Sort by score (descending)
+                scored_candidates.sort(key=lambda x: x[0], reverse=True)
+
+                # If top candidate has significantly better score, use it
+                if scored_candidates[0][0] > 0:
+                    best_match = scored_candidates[0][1]
+                    self.logger.debug(f"Selected match with genre score {scored_candidates[0][0]}: "
+                                    f"{best_match.get('name')} - {best_match.get('disambiguation', 'no disambiguation')}")
+                else:
+                    best_match = candidates[0]
+            else:
+                # Phase 3: Use first candidate (most relevant by MusicBrainz search ranking)
+                best_match = candidates[0]
+
+            # Phase 4: Calculate confidence and validate threshold
+            confidence = self.calculate_match_confidence(best_match, artist_name, spotify_genres)
+
+            if confidence < min_confidence:
+                disambiguation = best_match.get('disambiguation', 'no disambiguation')
+                self.logger.warning(
+                    f"Low confidence match ({confidence}%) for '{artist_name}' -> "
+                    f"'{best_match.get('name')}' ({disambiguation}). "
+                    f"Skipping MusicBrainz enrichment (threshold: {min_confidence}%)"
+                )
+                return None
+
+            self.logger.info(f"Match confidence: {confidence}% for '{best_match.get('name')}'")
+            return (best_match, confidence)
+
+        except Exception as e:
+            self.logger.error(f"Error searching MusicBrainz for '{artist_name}': {e}")
+            return None
+
+    def get_musicbrainz_metadata(self, artist_name: str, spotify_genres: List[str] = None) -> Optional[Dict[str, Any]]:
+        """
+        Get comprehensive MusicBrainz metadata for an artist.
+
+        Args:
+            artist_name: Name of artist to search for
+            spotify_genres: Optional Spotify genres for better matching
+
+        Returns dict with: mbid, birth_date, death_date, origin, instruments, aliases,
+                          tags, members, original_members, collaborators, artist_type, gender
+
+        Returns None if no match found or confidence below threshold
+        """
+        try:
+            self.logger.info(f"Searching MusicBrainz for: {artist_name}")
+
+            # Use improved matching logic with confidence scoring
+            match_result = self.find_best_musicbrainz_match(artist_name, spotify_genres)
+
+            if not match_result:
+                self.logger.info(f"No confident MusicBrainz match for: {artist_name} (skipping enrichment)")
+                return None
+
+            artist, confidence = match_result
+            mbid = artist.get('id')
+
+            if not mbid:
+                self.logger.warning(f"No MBID found for: {artist_name}")
+                return None
+
+            disambiguation = artist.get('disambiguation', '')
+            if disambiguation:
+                self.logger.info(f"Found MusicBrainz artist ({confidence}% confidence): {artist.get('name')} ({disambiguation}) - MBID: {mbid}")
+            else:
+                self.logger.info(f"Found MusicBrainz artist ({confidence}% confidence): {artist.get('name')} (MBID: {mbid})")
+
+            # Fetch detailed artist information with relationships
+            time.sleep(MUSICBRAINZ_RATE_LIMIT)
+            detailed = musicbrainzngs.get_artist_by_id(
+                mbid,
+                includes=['artist-rels', 'recording-rels', 'aliases', 'tags', 'ratings']
+            )
+
+            artist_data = detailed.get('artist', {})
+
+            # Extract basic metadata
+            metadata = {
+                'mbid': mbid,
+                'name': artist_data.get('name', artist_name),
+                'sort_name': artist_data.get('sort-name', ''),
+                'artist_type': artist_data.get('type', ''),  # Person, Group, Orchestra, etc.
+                'gender': artist_data.get('gender', ''),  # Male, Female, Other, Not applicable
+                'disambiguation': artist_data.get('disambiguation', ''),
+            }
+
+            # Extract birth/death dates from life-span
+            life_span = artist_data.get('life-span', {})
+            artist_type = artist_data.get('type', '').lower()
+
+            if life_span.get('begin'):
+                metadata['birth_date'] = life_span['begin']
+
+            # Only set death_date for individuals (Person type), not groups
+            # For groups, life-span.end represents disbandment, not death
+            if life_span.get('end') and artist_type == 'person':
+                metadata['death_date'] = life_span['end']
+
+            # Extract origin/birth place
+            if artist_data.get('area'):
+                metadata['country'] = artist_data['area'].get('name', '')
+            if artist_data.get('begin-area'):
+                metadata['origin'] = artist_data['begin-area'].get('name', '')
+
+            # Extract instruments (for Person type)
+            instruments = []
+            for rel in artist_data.get('artist-relation-list', []):
+                if rel.get('type') == 'member of band':
+                    # Extract instruments from attributes
+                    for attr in rel.get('attribute-list', []):
+                        if attr not in instruments:
+                            instruments.append(attr)
+
+            # Also check recording relations for instruments
+            for rel in artist_data.get('recording-relation-list', []):
+                for attr in rel.get('attribute-list', []):
+                    if attr not in instruments and 'vocal' in attr.lower() or 'guitar' in attr.lower() or 'piano' in attr.lower():
+                        instruments.append(attr)
+
+            if instruments:
+                metadata['instruments'] = instruments
+
+            # Extract aliases
+            aliases = []
+            for alias in artist_data.get('alias-list', []):
+                alias_name = alias.get('name', '')
+                if alias_name and alias_name != artist_name:
+                    aliases.append(alias_name)
+            if aliases:
+                metadata['aliases'] = aliases[:5]  # Limit to 5 most relevant
+
+            # Extract tags (top 3 genre tags)
+            tags = []
+            for tag in artist_data.get('tag-list', [])[:10]:  # Get top 10
+                tag_name = tag.get('name', '')
+                if tag_name:
+                    tags.append(tag_name)
+            if tags:
+                metadata['tags'] = tags[:3]  # Top 3 for display
+
+
+            # Extract collaborators from recordings
+            collaborators = self.extract_collaborators_from_musicbrainz(mbid)
+            if collaborators:
+                metadata['collaborators'] = collaborators
+
+            self.logger.info(f"MusicBrainz metadata extracted: {len(metadata)} fields")
+            return metadata
+
+        except musicbrainzngs.NetworkError as e:
+            self.logger.error(f"MusicBrainz network error for {artist_name}: {e}")
+            return None
+        except musicbrainzngs.ResponseError as e:
+            self.logger.error(f"MusicBrainz response error for {artist_name}: {e}")
+            return None
+        except Exception as e:
+            self.logger.error(f"Error getting MusicBrainz metadata for {artist_name}: {e}")
+            return None
+
+
+    def extract_collaborators_from_musicbrainz(self, mbid: str) -> List[str]:
+        """
+        Extract unique collaborator names from artist's recording appearances.
+
+        Returns: List of unique collaborator artist names (deduplicated)
+        """
+        try:
+            # Get artist's recordings with artist credits
+            time.sleep(MUSICBRAINZ_RATE_LIMIT)
+
+            # Browse recordings by artist
+            recordings = musicbrainzngs.browse_recordings(artist=mbid, limit=100)
+
+            collaborators = set()
+
+            for recording in recordings.get('recording-list', []):
+                # Check artist-credit for collaborations
+                for credit in recording.get('artist-credit', []):
+                    if isinstance(credit, dict):
+                        artist = credit.get('artist', {})
+                        artist_name = artist.get('name', '')
+
+                        # Skip if it's the same artist
+                        if artist.get('id') != mbid and artist_name:
+                            collaborators.add(artist_name)
+
+            self.logger.info(f"Found {len(collaborators)} unique collaborators from MusicBrainz")
+            return sorted(list(collaborators))[:20]  # Limit to top 20
+
+        except Exception as e:
+            self.logger.error(f"Error extracting collaborators from MusicBrainz: {e}")
+            return []
+
+    def deduplicate_collaborators(self, mb_collaborators: List[str],
+                                 perplexity_collaborators: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Merge and deduplicate collaborators from MusicBrainz and Perplexity sources.
+
+        Returns: Deduplicated list of collaborator dicts with wikilink format
+        """
+        try:
+            # Normalize function for comparison
+            def normalize(name: str) -> str:
+                return name.lower().strip().replace('.', '').replace(',', '')
+
+            # Build set of normalized names from Perplexity (already have details)
+            perplexity_names = set()
+            result = []
+
+            # Add Perplexity collaborators first (they have context)
+            for collab in perplexity_collaborators:
+                if isinstance(collab, dict):
+                    name = collab.get('name', '')
+                    if name:
+                        perplexity_names.add(normalize(name))
+                        result.append(collab)
+
+            # Add MusicBrainz collaborators if not already in list
+            for mb_name in mb_collaborators:
+                normalized = normalize(mb_name)
+                if normalized not in perplexity_names:
+                    # Add as simple collaborator dict
+                    result.append({
+                        'name': mb_name,
+                        'context': 'Collaborated on recordings',
+                        'specific_works': '',
+                        'time_period': '',
+                        'source': 'musicbrainz'
+                    })
+                    perplexity_names.add(normalized)
+
+            self.logger.info(f"Deduplicated collaborators: {len(result)} total ({len(perplexity_collaborators)} from Perplexity, {len(mb_collaborators)} from MusicBrainz)")
+            return result
+
+        except Exception as e:
+            self.logger.error(f"Error deduplicating collaborators: {e}")
+            return perplexity_collaborators
 
     # === PERPLEXITY API METHODS ===
 
@@ -517,14 +896,16 @@ Only include verified information from credible sources."""
             return True  # Assume needs enhancement on error
 
     def build_artist_card(self, artist_name: str, spotify_data: Dict[str, Any],
-                         perplexity_data: Dict[str, Any], image_path: str) -> str:
-        """Build complete artist card markdown with merged data."""
-        # Extract data
+                         musicbrainz_data: Dict[str, Any], perplexity_data: Dict[str, Any],
+                         image_path: str) -> str:
+        """Build complete artist card markdown with merged data from Spotify, MusicBrainz, and Perplexity."""
+        # Extract Spotify data
         genres = spotify_data.get('genres', [])
         popularity = spotify_data.get('popularity', 0)
         followers = spotify_data.get('followers', 0)
         spotify_url = spotify_data.get('spotify_url', '')
 
+        # Extract Perplexity data
         biography = perplexity_data.get('biography', '')
         connections = perplexity_data.get('connections', {})
         fun_facts = perplexity_data.get('fun_facts', [])
@@ -532,6 +913,31 @@ Only include verified information from credible sources."""
         wikipedia_url = perplexity_data.get('wikipedia_url', '')
         location_full = perplexity_data.get('location_full', '')
         entity_type = perplexity_data.get('entity_type', 'individual')
+
+        # Extract MusicBrainz data (with priority for structured data)
+        mb_birth_date = musicbrainz_data.get('birth_date', '')
+        mb_death_date = musicbrainz_data.get('death_date', '')
+        mb_origin = musicbrainz_data.get('origin', '')
+        mb_country = musicbrainz_data.get('country', '')
+        mb_instruments = musicbrainz_data.get('instruments', [])
+        mb_aliases = musicbrainz_data.get('aliases', [])
+        mb_tags = musicbrainz_data.get('tags', [])
+        mb_artist_type = musicbrainz_data.get('artist_type', '').lower()
+        mb_gender = musicbrainz_data.get('gender', '')
+        mb_disambiguation = musicbrainz_data.get('disambiguation', '')
+
+        # Merge entity_type: MusicBrainz has priority
+        if mb_artist_type:
+            if 'person' in mb_artist_type:
+                entity_type = 'individual'
+            elif 'group' in mb_artist_type or 'band' in mb_artist_type:
+                entity_type = 'group'
+
+        # Merge origin/birth_place: MusicBrainz has priority for structured data
+        if mb_origin:
+            location_full = mb_origin
+        elif mb_country and not location_full:
+            location_full = mb_country
 
         # Convert connections to simple format for frontmatter
         simple_connections = {}
@@ -567,6 +973,28 @@ Only include verified information from credible sources."""
             'last_updated': datetime.now().isoformat()
         }
 
+        # Add MusicBrainz data to frontmatter
+        if musicbrainz_data.get('mbid'):
+            frontmatter['musicbrainz_id'] = musicbrainz_data['mbid']
+            frontmatter['external_urls']['musicbrainz'] = f"https://musicbrainz.org/artist/{musicbrainz_data['mbid']}"
+
+        if mb_birth_date:
+            frontmatter['birth_date'] = mb_birth_date
+        if mb_death_date:
+            frontmatter['death_date'] = mb_death_date
+        if mb_gender:
+            frontmatter['gender'] = mb_gender
+        if mb_artist_type:
+            frontmatter['artist_type'] = mb_artist_type
+        if mb_disambiguation:
+            frontmatter['disambiguation'] = mb_disambiguation
+        if mb_instruments:
+            frontmatter['instruments'] = mb_instruments
+        if mb_aliases:
+            frontmatter['aliases'] = mb_aliases
+        if mb_tags:
+            frontmatter['tags'] = mb_tags
+
         # Add location based on entity type
         if location_full:
             if entity_type == 'individual':
@@ -583,15 +1011,32 @@ Only include verified information from credible sources."""
 
 ## Quick Info
 - **Genres**: {', '.join(genres[:5]) if genres else 'Not specified'}
-- **Spotify Popularity**: {popularity}/100
-- **Followers**: {followers:,}
 """
 
+        # Add instruments (for individuals only)
+        if mb_instruments and entity_type == 'individual':
+            content += f"- **Instruments**: {', '.join(mb_instruments)}\n"
+
+        # Add aliases
+        if mb_aliases:
+            content += f"- **Aliases**: {', '.join(mb_aliases)}\n"
+
+        content += f"- **Spotify Popularity**: {popularity}/100\n"
+        content += f"- **Followers**: {followers:,}\n"
+
+        # Add birth place/origin
         if location_full:
             if entity_type == 'individual':
-                content += f"- **Born**: {location_full}\n"
+                if mb_birth_date:
+                    content += f"- **Born**: {mb_birth_date}, {location_full}\n"
+                else:
+                    content += f"- **Born**: {location_full}\n"
             elif entity_type in ['band', 'group']:
                 content += f"- **Origin**: {location_full}\n"
+
+        # Add death date (if applicable)
+        if mb_death_date:
+            content += f"- **Died**: {mb_death_date}\n"
 
         content += f"""
 ## Biography
@@ -679,6 +1124,14 @@ Only include verified information from credible sources."""
             content += f"- [Spotify]({spotify_url})\n"
         if wikipedia_url:
             content += f"- [Wikipedia]({wikipedia_url})\n"
+        if musicbrainz_data.get('mbid'):
+            mb_url = f"https://musicbrainz.org/artist/{musicbrainz_data['mbid']}"
+            content += f"- [MusicBrainz]({mb_url})\n"
+
+        # Add Tags at the bottom (top 3 genre tags from MusicBrainz)
+        if mb_tags:
+            tag_string = ', '.join([f"#{tag.replace(' ', '-').replace('/', '-')}" for tag in mb_tags])
+            content += f"\n---\n**Tags**: {tag_string}\n"
 
         # Combine frontmatter and content
         frontmatter_text = yaml.dump(frontmatter, default_flow_style=False, allow_unicode=True)
@@ -728,7 +1181,19 @@ Only include verified information from credible sources."""
 
             time.sleep(SPOTIFY_RATE_LIMIT)
 
-            # STEP 2: Research with Perplexity
+            # STEP 2: Get MusicBrainz metadata (optional, non-blocking)
+            self.logger.info(f"Fetching MusicBrainz metadata for: {artist_name}")
+            spotify_genres = spotify_data.get('genres', [])
+            musicbrainz_data = self.get_musicbrainz_metadata(artist_name, spotify_genres)
+            if musicbrainz_data:
+                self.logger.info(f"MusicBrainz data retrieved for: {artist_name}")
+            else:
+                self.logger.info(f"No MusicBrainz data found for: {artist_name} (continuing with Perplexity only)")
+                musicbrainz_data = {}
+
+            time.sleep(MUSICBRAINZ_RATE_LIMIT)
+
+            # STEP 3: Research with Perplexity
             self.logger.info(f"Researching with Perplexity: {artist_name}")
             perplexity_data = self.research_with_perplexity(artist_name, spotify_data)
             if not perplexity_data or not perplexity_data.get('success'):
@@ -737,7 +1202,17 @@ Only include verified information from credible sources."""
 
             time.sleep(PERPLEXITY_RATE_LIMIT)
 
-            # STEP 3: Download image
+            # STEP 3.5: Merge and deduplicate collaborators from both sources
+            perplexity_collaborators = perplexity_data.get('connections', {}).get('collaborators', [])
+            mb_collaborators = musicbrainz_data.get('collaborators', [])
+            if mb_collaborators or perplexity_collaborators:
+                merged_collaborators = self.deduplicate_collaborators(mb_collaborators, perplexity_collaborators)
+                # Update perplexity_data with merged collaborators
+                if 'connections' not in perplexity_data:
+                    perplexity_data['connections'] = {}
+                perplexity_data['connections']['collaborators'] = merged_collaborators
+
+            # STEP 4: Download image
             self.logger.info(f"Downloading image for: {artist_name}")
             image_path = None
             if spotify_data.get('image_url'):
@@ -747,17 +1222,17 @@ Only include verified information from credible sources."""
                 self.logger.warning(f"No image downloaded for: {artist_name}")
                 image_path = ""  # Continue without image
 
-            # STEP 4: Build card
+            # STEP 5: Build card
             self.logger.info(f"Building card for: {artist_name}")
-            card_content = self.build_artist_card(artist_name, spotify_data, perplexity_data, image_path)
+            card_content = self.build_artist_card(artist_name, spotify_data, musicbrainz_data, perplexity_data, image_path)
 
-            # STEP 5: Write card
+            # STEP 6: Write card
             card_path = self.cards_dir / f"{self.sanitize_filename(artist_name)}.md"
             if not self.write_card(card_path, card_content):
                 self.stats['errors'] += 1
                 return "❌ Failed to write card"
 
-            # STEP 6: Update connections database
+            # STEP 7: Update connections database
             connections = perplexity_data.get('connections', {})
             if connections:
                 simple_connections = {}
